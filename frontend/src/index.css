@@ -1,0 +1,79 @@
+:root {
+  /* Premium Dark Theme Palette */
+  --bg-primary: #0f1115;
+  --bg-secondary: #181b21;
+  --bg-card: #1e2229;
+  
+  --text-primary: #ffffff;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  
+  --accent-primary: #3b82f6; /* Blue for trust/finance */
+  --accent-success: #10b981; /* Green for gains */
+  --accent-danger: #ef4444; /* Red for losses/risk */
+  --accent-warning: #f59e0b;
+  
+  --border-subtle: #2d3139;
+  
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Utilities */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+  font-size: 0.95rem;
+}
+
+.btn-primary {
+  background-color: var(--accent-primary);
+  color: white;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.1);
+}
+
+.card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 1rem;
+  padding: 1.5rem;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+.text-success { color: var(--accent-success); }
+.text-danger { color: var(--accent-danger); }
+.text-muted { color: var(--text-muted); }
+
+h1, h2, h3, h4 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
