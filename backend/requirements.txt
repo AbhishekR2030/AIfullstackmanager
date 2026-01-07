@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 gunicorn
 yfinance
 pandas
@@ -14,4 +14,4 @@ asyncpg
 python-multipart
 python-jose[cryptography]
 passlib[bcrypt]
-pandas-ta
+pandas-ta==0.3.14b
