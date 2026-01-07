@@ -1,6 +1,6 @@
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+import ta
 import numpy as np
 from app.utils.tickers import NIFTY_500_TICKERS
 
@@ -40,10 +40,12 @@ class MarketScanner:
                 sma_50 = df['Close'].rolling(window=50).mean()
                 
                 # 2. RSI 14
-                rsi_14 = ta.rsi(df['Close'], length=14)
+                rsi_indicator = ta.momentum.RSIIndicator(close=df['Close'], window=14)
+                rsi_14 = rsi_indicator.rsi()
                 
                 # 3. ATR 14 (Volatility)
-                atr_14 = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+                atr_indicator = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+                atr_14 = atr_indicator.average_true_range()
                 
                 # 4. Volume SMA 20
                 vol_sma_20 = df['Volume'].rolling(window=20).mean()
