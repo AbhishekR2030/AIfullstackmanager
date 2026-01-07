@@ -1,13 +1,14 @@
 # Use official Python runtime
-FROM python:3.10-slim
+FROM python:3.9-slim
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (needed for libraries like numpy/pandas/bcrypt)
+# Install system dependencies (needed for libraries like numpy/pandas/bcrypt and git)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker cache

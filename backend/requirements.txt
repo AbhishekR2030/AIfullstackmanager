@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 gunicorn
 yfinance
-pandas
+pandas<2.0.0
 numpy
 google-generativeai
 openai
@@ -14,4 +14,4 @@ asyncpg
 python-multipart
 python-jose[cryptography]
 passlib[bcrypt]
-pandas-ta==0.3.14b
+git+https://github.com/twopirllc/pandas-ta.git@development
