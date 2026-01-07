@@ -4,7 +4,7 @@ import './StockCard.css';
 
 const StockCard = ({ stock, onClick }) => {
     return (
-        <div className="card stock-card" onClick={() => onClick(stock)}>
+        <div className="card stock-card">
             <div className="stock-header">
                 <div className="stock-ticker">{stock.ticker.replace('.NS', '')}</div>
                 <div className="stock-price">₹{stock.price}</div>
@@ -12,23 +12,20 @@ const StockCard = ({ stock, onClick }) => {
 
             <div className="stock-metrics">
                 <div className="metric">
-                    <span className="label">SMA 20</span>
-                    <span className="value">₹{stock.sma_20}</span>
+                    <span className="label">Momentum Score</span>
+                    <span className="value text-primary">
+                        {(stock.volume_shock || stock.momentum_score || 0).toFixed(2)}x
+                    </span>
                 </div>
                 <div className="metric">
-                    <span className="label">Momentum</span>
-                    <span className={`value ${stock.momentum_score > 0 ? 'text-success' : 'text-danger'}`}>
-                        {stock.momentum_score}%
+                    <span className="label">Proj. Upside (30d)</span>
+                    <span className="value text-success">
+                        +{((stock.volatility || 0) * 10).toFixed(1)}%
                     </span>
                 </div>
             </div>
 
-            <div className="stock-action">
-                <button className="btn btn-sm btn-outline">
-                    <Activity size={16} style={{ marginRight: '6px' }} />
-                    Generate Thesis
-                </button>
-            </div>
+
         </div>
     );
 };

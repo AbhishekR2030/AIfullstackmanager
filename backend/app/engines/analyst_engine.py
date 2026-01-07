@@ -9,10 +9,74 @@ class AnalystEngine:
         self.api_key = os.getenv("GOOGLE_API_KEY")
         if self.api_key:
             genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel('models/gemini-flash-latest')
         else:
             print("Warning: GOOGLE_API_KEY not found in environment variables.")
-            self.model = None
+
+        # Priority List: Try powerful models first, fallback to reliable/fast ones
+        self.models = [
+            'models/gemini-2.0-flash',      # 1. Newest High Performance
+            'models/gemini-1.5-pro',        # 2. High Reasoning (if available)
+            'models/gemini-1.5-flash',      # 3. High Quota / Stability Workhorse
+        ]
+
+    # ... (fetch_market_data, fetch_news, get_macro_data remain same)
+
+    def generate_thesis(self, ticker_symbol):
+        if not self.api_key:
+            return {"error": "LLM not initialized (Missing API Key)"}
+
+        data = self.fetch_market_data(ticker_symbol)
+        news = self.fetch_news(ticker_symbol)
+        macro = self.get_macro_data()
+
+        prompt = f"""
+        You are a Citadel Quant Researcher focusing on the Indian Market.
+        Analyze the following asset: {ticker_symbol}
+
+        **Market Data:**
+        {json.dumps(data, default=str)}
+
+        **Recent News:**
+        {json.dumps(news)}
+
+        **Macro Context:**
+        {json.dumps(macro)}
+
+        **Task:**
+        Provide a structured investment thesis. 
+        Output STRICT JSON format with the following keys:
+        - recommendation: "Buy", "Sell", or "Hold"
+        - thesis: [list of 3 bullet points]
+        - risk_factors: [list of risks]
+        - confidence_score: (0-100 integer)
+        """
+
+        last_error = None
+
+        # Smart Tiering Strategy
+        for model_name in self.models:
+            print(f"Trying AI Model: {model_name}...")
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                
+                # Basic cleanup
+                text = response.text.replace("```json", "").replace("```", "").strip()
+                result = json.loads(text)
+                
+                # If successful, inject the model name used for transparency
+                result['model_used'] = model_name 
+                return result
+
+            except Exception as e:
+                print(f"Failed with {model_name}: {e}")
+                last_error = e
+                continue # Try next model
+        
+        # If all failed
+        return {"error": f"All AI tiers failed. Last error: {str(last_error)}"}
+
+
 
     def fetch_market_data(self, ticker_symbol):
         """Fetches price data and issuer info."""
@@ -47,43 +111,8 @@ class AnalystEngine:
             "us_fed_rate": "5.25%"
         }
 
-    def generate_thesis(self, ticker_symbol):
-        data = self.fetch_market_data(ticker_symbol)
-        news = self.fetch_news(ticker_symbol)
-        macro = self.get_macro_data()
 
-        prompt = f"""
-        You are a Citadel Quant Researcher focusing on the Indian Market.
-        Analyze the following asset: {ticker_symbol}
 
-        **Market Data:**
-        {json.dumps(data, default=str)}
-
-        **Recent News:**
-        {json.dumps(news)}
-
-        **Macro Context:**
-        {json.dumps(macro)}
-
-        **Task:**
-        Provide a structured investment thesis. 
-        Output STRICT JSON format with the following keys:
-        - recommendation: "Buy", "Sell", or "Hold"
-        - thesis: [list of 3 bullet points]
-        - risk_factors: [list of risks]
-        - confidence_score: (0-100 integer)
-        """
-
-        if not self.model:
-            return {"error": "LLM not initialized"}
-
-        try:
-            response = self.model.generate_content(prompt)
-            # Basic cleanup if markdown backticks are present
-            text = response.text.replace("```json", "").replace("```", "").strip()
-            return json.loads(text)
-        except Exception as e:
-            return {"error": str(e)}
 
 if __name__ == "__main__":
     # For quick testing

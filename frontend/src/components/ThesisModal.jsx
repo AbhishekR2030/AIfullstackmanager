@@ -19,10 +19,10 @@ const ThesisModal = ({ isOpen, onClose, data, ticker, isLoading }) => {
                     {isLoading ? (
                         <div className="loading-state">
                             <div className="spinner"></div>
-                            <p>Consulting the Analyst Engine via Gemini 1.5...</p>
+                            <p>Consulting the Analyst Engine via Gemini 1.5 Flash...</p>
                             <p className="text-muted text-sm">This may take up to 15 seconds.</p>
                         </div>
-                    ) : data ? (
+                    ) : data && !data.error ? (
                         <div className="thesis-content">
                             <div className="recommendation-badge" data-type={data.recommendation.toLowerCase()}>
                                 {data.recommendation}
@@ -64,8 +64,10 @@ const ThesisModal = ({ isOpen, onClose, data, ticker, isLoading }) => {
                             </div>
                         </div>
                     ) : (
-                        <div className="error-state">
-                            <p>Failed to load analysis.</p>
+                        <div className="error-state" style={{ textAlign: 'center', padding: '2rem', color: '#ef4444' }}>
+                            <AlertTriangle size={48} style={{ marginBottom: '1rem' }} />
+                            <h3>Analysis Failed</h3>
+                            <p>{data?.error || "Unknown error occurred."}</p>
                         </div>
                     )}
                 </div>

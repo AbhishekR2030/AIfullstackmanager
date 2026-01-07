@@ -155,6 +155,70 @@ async def delete_trade(ticker: str, current_user = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+from app.engines.scanner_engine import MarketScanner
+from app.engines.rebalancer_engine import RebalancerEngine
+
+market_scanner = MarketScanner()
+rebalancer = RebalancerEngine()
+
+@router.get("/discovery/scan")
+async def scan_opportunities(current_user = Depends(get_current_user)):
+    """
+    Scans for new buy opportunities and rebalancing candidates.
+    """
+    try:
+        # 1. Run Market Scanner
+        buy_candidates = market_scanner.scan_market()
+        
+        # 2. Analyze Portfolio (Rebalancer)
+        user_portfolio = portfolio_manager.get_portfolio(current_user.email)
+        analyzed_holdings = rebalancer.analyze_portfolio(user_portfolio)
+        
+        # 3. Generate Recommendations
+        recommendations = {
+            "buy_candidates": buy_candidates,
+            "sell_candidates": [],
+            "keepers": []
+        }
+        
+        # Organize holdings
+        # Sort potential sells by worst performance first? Or just weakest trend.
+        for asset in analyzed_holdings:
+            if asset['recommendation'] == 'SELL_CANDIDATE':
+                recommendations['sell_candidates'].append(asset)
+            else:
+                recommendations['keepers'].append(asset)
+                
+        # If we have sell candidates and buy candidates, create specific swap suggestions
+        swap_opportunities = []
+        if recommendations['sell_candidates'] and buy_candidates:
+            # We pair the WORST asset (highest negative returns / broken trend) 
+            # with the BEST buy candidate (highest score).
+            
+            # Sort Sells: Weakest first (lowest pl_percent)
+            sorted_sells = sorted(recommendations['sell_candidates'], key=lambda x: x['pl_percent'])
+            
+            # Top Buy is already sorted by Score
+            top_buy = buy_candidates[0]
+            
+            for index, sell in enumerate(sorted_sells):
+                swap_opportunities.append({
+                    "priority": index + 1,
+                    "sell": sell['ticker'],
+                    "buy": top_buy['ticker'],
+                    "reason": f"Sell weak {sell['ticker']} (Trend {sell['trend']}, Returns {sell['pl_percent']}%) to buy strong {top_buy['ticker']} (Momentum Score {top_buy['score']})"
+                })
+        
+        return {
+            "scan_results": buy_candidates,
+            "portfolio_analysis": analyzed_holdings,
+            "swap_opportunities": swap_opportunities
+        }
+
+    except Exception as e:
+        print(f"Discovery Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 from app.engines.search_engine import SearchEngine
 search_engine = SearchEngine()
 

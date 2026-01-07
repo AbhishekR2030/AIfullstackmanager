@@ -85,4 +85,14 @@ export const fetchPortfolioHistory = async (period = '1y') => {
     }
 }
 
+export const fetchDiscoveryScan = async () => {
+    try {
+        const response = await api.get('/discovery/scan');
+        return response.data;
+    } catch (error) {
+        console.error("Error fetching discovery scan:", error);
+        throw error;
+    }
+}
+
 export default api;
