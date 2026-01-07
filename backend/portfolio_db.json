@@ -1,0 +1,58 @@
+{
+    "chabhishekreddy@gmail.com": [
+        {
+            "ticker": "ADANIPORTS.NS",
+            "buy_date": "2024-06-05",
+            "buy_price": 1299.15,
+            "quantity": 155
+        },
+        {
+            "ticker": "SILVERBEES.NS",
+            "buy_date": "2025-12-24",
+            "buy_price": 210.5,
+            "quantity": 1513
+        },
+        {
+            "ticker": "GOLDBEES.NS",
+            "buy_date": "2024-08-27",
+            "buy_price": 60.84,
+            "quantity": 4953
+        },
+        {
+            "ticker": "OLAELEC.NS",
+            "buy_date": "2024-09-16",
+            "buy_price": 109.77,
+            "quantity": 1850
+        },
+        {
+            "ticker": "SWIGGY.NS",
+            "buy_date": "2025-02-07",
+            "buy_price": 381.18,
+            "quantity": 750
+        },
+        {
+            "ticker": "TANLA.NS",
+            "buy_date": "2024-12-04",
+            "buy_price": 730.54,
+            "quantity": 136
+        },
+        {
+            "ticker": "TARSONS.NS",
+            "buy_date": "2024-06-24",
+            "buy_price": 500.53,
+            "quantity": 200
+        },
+        {
+            "ticker": "TATAELXSI.BO",
+            "buy_date": "2024-06-07",
+            "buy_price": 7150.32,
+            "quantity": 14
+        },
+        {
+            "ticker": "ZENTEC.BO",
+            "buy_date": "2024-12-04",
+            "buy_price": 1841.62,
+            "quantity": 55
+        }
+    ]
+}

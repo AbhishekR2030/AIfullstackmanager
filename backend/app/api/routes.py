@@ -1,18 +1,91 @@
-from fastapi import APIRouter, HTTPException
+
+from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from typing import List, Optional
+from datetime import timedelta
 
 from app.engines.analyst_engine import AnalystEngine
 from app.engines.screener_engine import ScreenerEngine
+from app.engines.portfolio_engine import PortfolioEngine
+from app.engines.search_engine import SearchEngine
+from app.engines.auth_engine import auth_engine, SessionLocal
+from app.utils.jwt_handler import create_access_token, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
 
 router = APIRouter()
 
 # Instantiate engines
 analyst = AnalystEngine()
 screener = ScreenerEngine()
+portfolio_manager = PortfolioEngine()
+search_engine = SearchEngine()
+
+# Auth Models
+class UserCreate(BaseModel):
+    email: str
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+# --- Auth Routes ---
+@router.post("/auth/signup", response_model=Token)
+async def signup(user: UserCreate, db: SessionLocal = Depends(auth_engine.get_db)):
+    print(f"Signup request for: {user.email}") # Debug log
+    
+    db_user = auth_engine.get_user_by_email(db, email=user.email)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    auth_engine.create_user(db, email=user.email, password=user.password)
+    print("User created in DB.")
+    
+    # Auto-login after signup
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+@router.post("/auth/login", response_model=Token)
+async def login_json(data: LoginRequest, db: SessionLocal = Depends(auth_engine.get_db)):
+    user = auth_engine.get_user_by_email(db, email=data.email)
+    
+    if not user or not auth_engine.verify_password(data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@router.get("/auth/me")
+async def read_users_me(current_user = Depends(get_current_user)):
+    return {"email": current_user.email, "id": current_user.id}
+
+# --- Existing Routes ---
+@router.get("/")
+async def root():
+    return {"message": "Welcome to the API"}
 
 class AnalyzeRequest(BaseModel):
     ticker: str
+
+class TradeRequest(BaseModel):
+    ticker: str
+    buy_date: str
+    buy_price: float
+    quantity: int
 
 class AnalyzeResponse(BaseModel):
     recommendation: str
@@ -46,5 +119,51 @@ async def screen_market():
     try:
         matches = screener.screen_market()
         return {"matches": matches, "count": len(matches)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/portfolio/add")
+async def add_trade(request: TradeRequest, current_user = Depends(get_current_user)):
+    try:
+        # Pass user email to engine
+        return portfolio_manager.add_trade(request.dict(), current_user.email)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/portfolio")
+async def get_portfolio(current_user = Depends(get_current_user)):
+    try:
+        return portfolio_manager.get_portfolio(current_user.email)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/portfolio/history")
+async def get_portfolio_history(period: str = "1y", current_user = Depends(get_current_user)):
+    """
+    Returns historical portfolio value and invested amount.
+    Period options: 1mo, 3mo, 6mo, 1y, ytd, all
+    """
+    try:
+        return portfolio_manager.get_portfolio_history(current_user.email, period)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/portfolio/delete/{ticker}")
+async def delete_trade(ticker: str, current_user = Depends(get_current_user)):
+    try:
+        return portfolio_manager.delete_trade(ticker, current_user.email)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+from app.engines.search_engine import SearchEngine
+search_engine = SearchEngine()
+
+@router.get("/search")
+async def search_ticker(q: str):
+    """
+    Searches for stocks by name or ticker.
+    """
+    try:
+        return search_engine.search(q)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

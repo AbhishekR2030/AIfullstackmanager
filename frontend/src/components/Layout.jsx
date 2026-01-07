@@ -1,12 +1,21 @@
 import React from 'react';
-import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Telescope, PieChart, Menu } from 'lucide-react';
+import { Link, useLocation, useNavigate, Outlet } from 'react-router-dom';
+import { LayoutDashboard, Telescope, PieChart, LogOut } from 'lucide-react';
 import './Layout.css';
 
 const Layout = ({ children }) => {
     const location = useLocation();
+    const navigate = useNavigate();
 
     const isActive = (path) => location.pathname === path ? 'active' : '';
+
+    const handleLogout = () => {
+        if (window.confirm("Are you sure you want to sign out?")) {
+            localStorage.removeItem('token');
+            localStorage.removeItem('userEmail');
+            navigate('/login');
+        }
+    };
 
     return (
         <div className="app-layout">
@@ -30,11 +39,17 @@ const Layout = ({ children }) => {
                         <span>Portfolio</span>
                     </Link>
                 </div>
+                <div className="nav-actions">
+                    <button className="nav-item btn-logout" onClick={handleLogout} title="Sign Out">
+                        <LogOut size={20} />
+                        <span className="desktop-only">Sign Out</span>
+                    </button>
+                </div>
             </nav>
 
             <main className="main-content">
                 <div className="container">
-                    {children}
+                    {children || <Outlet />}
                 </div>
             </main>
 
@@ -49,6 +64,9 @@ const Layout = ({ children }) => {
                 <Link to="/portfolio" className={`mobile-nav-item ${isActive('/portfolio')}`}>
                     <PieChart size={24} />
                 </Link>
+                <button className="mobile-nav-item btn-logout-mobile" onClick={handleLogout}>
+                    <LogOut size={24} />
+                </button>
             </nav>
         </div>
     );
