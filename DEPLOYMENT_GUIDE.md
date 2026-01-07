@@ -13,12 +13,13 @@ We will host the Python API on Render.
 2.  **Create Service**:
     *   Click the **"New +"** button -> Select **"Web Service"**.
     *   Connect your GitHub repository: `AlphaSeeker`.
-3.  **Configure Settings**:
-    *   **Name**: `alphaseeker-backend` (or similar)
-    *   **Region**: `Singapore` works best for India (or default).
+3.  **Configure Settings** (Important!):
+    *   **Name**: `alphaseeker-backend`
+    *   **Region**: `Singapore` (or distinct/default)
+    *   **Root Directory**: `backend`  <-- **MAKE SURE TO SET THIS**
     *   **Runtime**: **Python 3**
-    *   **Build Command**: `pip install -r backend/requirements.txt`
-    *   **Start Command**: `cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT`
+    *   **Build Command**: `pip install -r requirements.txt`
+    *   **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
     *   **Plan Type**: Select **Free**.
 4.  **Environment Variables**:
     *   Scroll down to "Environment Variables" and click "Add Environment Variable".
@@ -68,4 +69,3 @@ Your app is now live on the internet! You can share the Vercel link with anyone.
     1.  Check if your Backend (Render) is awake. Free tier sleeps after 15 mins. Loading the site might take 30s to wake it up.
     2.  Check if you added `/api/v1` to the `VITE_API_URL` variable in Vercel.
 *   **"Authentication Failed"**: Ensure `SECRET_KEY` is set in Render env vars.
-
