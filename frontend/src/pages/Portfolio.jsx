@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { getPortfolio, addTrade, deleteTrade, searchStocks } from '../services/api';
-import { Plus, TrendingUp, TrendingDown, Trash2 } from 'lucide-react';
+import { getPortfolio, addTrade, deleteTrade, searchStocks, syncHDFCPortfolio, getHDFCLoginUrl } from '../services/api';
+import { Plus, TrendingUp, TrendingDown, Trash2, RefreshCw } from 'lucide-react';
 import './Portfolio.css';
 
 const Portfolio = () => {
     const [portfolio, setPortfolio] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showAddModal, setShowAddModal] = useState(false);
+    const [isSyncing, setIsSyncing] = useState(false);
 
     // Autocomplete State
     const [suggestions, setSuggestions] = useState([]);
@@ -75,6 +76,34 @@ const Portfolio = () => {
         }
     };
 
+    const handleSyncHDFC = async () => {
+        setIsSyncing(true);
+        try {
+            // First try simple sync (assumes token exists on backend)
+            // But if we want robust OAuth, we can check.
+            // For now, let's try calling sync. If it fails with Auth Error, redirect to login.
+
+            await syncHDFCPortfolio();
+            await loadPortfolio();
+            alert("Portfolio synced successfully with HDFC!");
+        } catch (error) {
+            console.error("Sync failed:", error);
+            // Check if error is due to missing auth (usually we can check status 401/400)
+
+            const confirmLogin = window.confirm("HDFC Sync failed. Do you want to login to HDFC InvestRight to authorize account access?");
+            if (confirmLogin) {
+                const loginUrl = await getHDFCLoginUrl();
+                if (loginUrl) {
+                    window.location.href = loginUrl;
+                } else {
+                    alert("Could not get login URL from backend.");
+                }
+            }
+        } finally {
+            setIsSyncing(false);
+        }
+    };
+
     const handleAddTrade = async (e) => {
         e.preventDefault();
         if (isSubmitting) return;
@@ -117,9 +146,15 @@ const Portfolio = () => {
                     <h1>My Portfolio</h1>
                     <p className="text-muted">Track your active positions.</p>
                 </div>
-                <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
-                    <Plus size={20} /> Add Trade
-                </button>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                    <button className="btn btn-secondary" onClick={handleSyncHDFC} disabled={isSyncing} title="Sync from HDFC InvestRight">
+                        <RefreshCw size={20} className={isSyncing ? "spin-animation" : ""} />
+                        {isSyncing ? ' Syncing...' : ' Sync HDFC'}
+                    </button>
+                    <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
+                        <Plus size={20} /> Add Trade
+                    </button>
+                </div>
             </div>
 
             {/* Summary Card */}
@@ -141,121 +176,125 @@ const Portfolio = () => {
                 </div>
             </div>
 
-            {loading ? (
-                <div className="loading-state">
-                    <div className="spinner"></div>
-                    <p className="mt-2">Fetching live prices...</p>
-                </div>
-            ) : portfolio.length === 0 ? (
-                <div className="empty-state">
-                    <p>No trades yet. Add your first position!</p>
-                </div>
-            ) : (
-                <div className="portfolio-table-container">
-                    <table className="portfolio-table">
-                        <thead>
-                            <tr>
-                                <th>Asset</th>
-                                <th>Avg. Price</th>
-                                <th>Qty</th>
-                                <th>Current Price</th>
-                                <th>Current Value</th>
-                                <th>P&L</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {portfolio.map((trade, index) => (
-                                <tr key={index}>
-                                    <td className="fw-bold">{trade.ticker}</td>
-                                    <td>₹{trade.buy_price}</td>
-                                    <td>{trade.quantity}</td>
-                                    <td>₹{trade.current_price}</td>
-                                    <td>₹{trade.total_value}</td>
-                                    <td className={trade.pl_percent >= 0 ? 'text-success' : 'text-danger'}>
-                                        {trade.pl_percent >= 0 ? '+' : ''}{trade.pl_percent}%
-                                    </td>
-                                    <td>
-                                        <button className="btn-icon text-danger" onClick={() => handleDelete(trade.ticker)}>
-                                            <Trash2 size={16} />
-                                        </button>
-                                    </td>
+            {
+                loading ? (
+                    <div className="loading-state">
+                        <div className="spinner"></div>
+                        <p className="mt-2">Fetching live prices...</p>
+                    </div>
+                ) : portfolio.length === 0 ? (
+                    <div className="empty-state">
+                        <p>No trades yet. Add your first position!</p>
+                    </div>
+                ) : (
+                    <div className="portfolio-table-container">
+                        <table className="portfolio-table">
+                            <thead>
+                                <tr>
+                                    <th>Asset</th>
+                                    <th>Avg. Price</th>
+                                    <th>Qty</th>
+                                    <th>Current Price</th>
+                                    <th>Current Value</th>
+                                    <th>P&L</th>
+                                    <th>Actions</th>
                                 </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
+                            </thead>
+                            <tbody>
+                                {portfolio.map((trade, index) => (
+                                    <tr key={index}>
+                                        <td className="fw-bold">{trade.ticker}</td>
+                                        <td>₹{trade.buy_price}</td>
+                                        <td>{trade.quantity}</td>
+                                        <td>₹{trade.current_price}</td>
+                                        <td>₹{trade.total_value}</td>
+                                        <td className={trade.pl_percent >= 0 ? 'text-success' : 'text-danger'}>
+                                            {trade.pl_percent >= 0 ? '+' : ''}{trade.pl_percent}%
+                                        </td>
+                                        <td>
+                                            <button className="btn-icon text-danger" onClick={() => handleDelete(trade.ticker)}>
+                                                <Trash2 size={16} />
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )
+            }
 
             {/* Add Trade Modal */}
-            {showAddModal && (
-                <div className="modal-overlay">
-                    <div className="modal-container card" style={{ maxWidth: '400px' }}>
-                        <div className="modal-header">
-                            <h2>Add New Trade</h2>
-                            <button className="btn-icon" onClick={() => setShowAddModal(false)}>×</button>
+            {
+                showAddModal && (
+                    <div className="modal-overlay">
+                        <div className="modal-container card" style={{ maxWidth: '400px' }}>
+                            <div className="modal-header">
+                                <h2>Add New Trade</h2>
+                                <button className="btn-icon" onClick={() => setShowAddModal(false)}>×</button>
+                            </div>
+                            <form onSubmit={handleAddTrade} className="add-trade-form">
+                                <div className="form-group relative">
+                                    <label>Ticker Symbol (e.g. RELIANCE)</label>
+                                    <input
+                                        type="text"
+                                        placeholder="Search stock..."
+                                        value={newTrade.ticker}
+                                        onChange={handleTickerChange}
+                                        onFocus={() => { if (newTrade.ticker) setShowSuggestions(true); }}
+                                        autoComplete="off"
+                                        required
+                                    />
+                                    {showSuggestions && suggestions.length > 0 && (
+                                        <ul className="suggestions-list">
+                                            {suggestions.map((s) => (
+                                                <li key={s.symbol} onClick={() => selectSuggestion(s)}>
+                                                    <span className="fw-bold">{s.symbol}</span>
+                                                    <span className="text-muted" style={{ fontSize: '0.8rem', marginLeft: '10px' }}>{s.name}</span>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    )}
+                                </div>
+                                <div className="form-group">
+                                    <label>Buy Date</label>
+                                    <input
+                                        type="date"
+                                        value={newTrade.buy_date}
+                                        onChange={(e) => setNewTrade({ ...newTrade, buy_date: e.target.value })}
+                                        required
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label>Buy Price (₹)</label>
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        placeholder="150.00"
+                                        value={newTrade.buy_price}
+                                        onChange={(e) => setNewTrade({ ...newTrade, buy_price: e.target.value })}
+                                        required
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label>Quantity</label>
+                                    <input
+                                        type="number"
+                                        placeholder="10"
+                                        value={newTrade.quantity}
+                                        onChange={(e) => setNewTrade({ ...newTrade, quantity: e.target.value })}
+                                        required
+                                    />
+                                </div>
+                                <button type="submit" className="btn btn-primary w-100" disabled={isSubmitting}>
+                                    {isSubmitting ? 'Adding...' : 'Add Trade'}
+                                </button>
+                            </form>
                         </div>
-                        <form onSubmit={handleAddTrade} className="add-trade-form">
-                            <div className="form-group relative">
-                                <label>Ticker Symbol (e.g. RELIANCE)</label>
-                                <input
-                                    type="text"
-                                    placeholder="Search stock..."
-                                    value={newTrade.ticker}
-                                    onChange={handleTickerChange}
-                                    onFocus={() => { if (newTrade.ticker) setShowSuggestions(true); }}
-                                    autoComplete="off"
-                                    required
-                                />
-                                {showSuggestions && suggestions.length > 0 && (
-                                    <ul className="suggestions-list">
-                                        {suggestions.map((s) => (
-                                            <li key={s.symbol} onClick={() => selectSuggestion(s)}>
-                                                <span className="fw-bold">{s.symbol}</span>
-                                                <span className="text-muted" style={{ fontSize: '0.8rem', marginLeft: '10px' }}>{s.name}</span>
-                                            </li>
-                                        ))}
-                                    </ul>
-                                )}
-                            </div>
-                            <div className="form-group">
-                                <label>Buy Date</label>
-                                <input
-                                    type="date"
-                                    value={newTrade.buy_date}
-                                    onChange={(e) => setNewTrade({ ...newTrade, buy_date: e.target.value })}
-                                    required
-                                />
-                            </div>
-                            <div className="form-group">
-                                <label>Buy Price (₹)</label>
-                                <input
-                                    type="number"
-                                    step="0.01"
-                                    placeholder="150.00"
-                                    value={newTrade.buy_price}
-                                    onChange={(e) => setNewTrade({ ...newTrade, buy_price: e.target.value })}
-                                    required
-                                />
-                            </div>
-                            <div className="form-group">
-                                <label>Quantity</label>
-                                <input
-                                    type="number"
-                                    placeholder="10"
-                                    value={newTrade.quantity}
-                                    onChange={(e) => setNewTrade({ ...newTrade, quantity: e.target.value })}
-                                    required
-                                />
-                            </div>
-                            <button type="submit" className="btn btn-primary w-100" disabled={isSubmitting}>
-                                {isSubmitting ? 'Adding...' : 'Add Trade'}
-                            </button>
-                        </form>
                     </div>
-                </div>
-            )}
-        </div>
+                )
+            }
+        </div >
     );
 };
 

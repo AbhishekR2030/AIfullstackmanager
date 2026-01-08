@@ -9,6 +9,7 @@ from app.engines.analyst_engine import AnalystEngine
 from app.engines.screener_engine import ScreenerEngine
 from app.engines.portfolio_engine import PortfolioEngine
 from app.engines.search_engine import SearchEngine
+from app.engines.hdfc_engine import HDFCEngine
 from app.engines.auth_engine import auth_engine, SessionLocal
 from app.utils.jwt_handler import create_access_token, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
 
@@ -19,6 +20,7 @@ analyst = AnalystEngine()
 screener = ScreenerEngine()
 portfolio_manager = PortfolioEngine()
 search_engine = SearchEngine()
+hdfc_engine = HDFCEngine()
 
 # Auth Models
 class UserCreate(BaseModel):
@@ -72,6 +74,42 @@ async def login_json(data: LoginRequest, db: SessionLocal = Depends(auth_engine.
 @router.get("/auth/me")
 async def read_users_me(current_user = Depends(get_current_user)):
     return {"email": current_user.email, "id": current_user.id}
+
+@router.get("/auth/hdfc/login")
+async def hdfc_login(redirect_uri: Optional[str] = None):
+    """
+    Returns the HDFC login page URL.
+    """
+    login_url = hdfc_engine.get_login_url(redirect_uri)
+    if not login_url:
+         raise HTTPException(status_code=500, detail="HDFC configuration missing")
+    
+    return {"login_url": login_url}
+
+@router.get("/auth/callback")
+async def auth_callback(
+    code: Optional[str] = None, 
+    request_token: Optional[str] = None,
+    state: Optional[str] = None
+):
+    """
+    Generic callback handler for OAuth flows.
+    HDFC returns 'request_token' for v1, 'code' for std oauth.
+    """
+    token = code or request_token
+    
+    if token:
+           # Attempt exchange
+           result = hdfc_engine.exchange_token(token)
+           
+           if "error" in result:
+                return {"message": "Token exchange failed", "details": result}
+           
+           # If successful, we should verify the user and perhaps redirect them back to the frontend
+           # For now, simplistic response
+           return {"message": "Authorization successful. You can close this window.", "access_token": result.get("access_token")}
+           
+    return {"message": "No code received", "params": {"code": code, "request_token": request_token}}
 
 # --- Existing Routes ---
 @router.get("/")
@@ -134,6 +172,25 @@ async def add_trade(request: TradeRequest, current_user = Depends(get_current_us
 async def get_portfolio(current_user = Depends(get_current_user)):
     try:
         return portfolio_manager.get_portfolio(current_user.email)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/portfolio/sync/hdfc")
+async def sync_hdfc_portfolio(current_user = Depends(get_current_user)):
+    """
+    Fetches latest holdings from HDFC and updates the portfolio.
+    """
+    try:
+        # 1. Fetch from HDFC
+        holdings = hdfc_engine.fetch_holdings()
+        
+        if isinstance(holdings, dict) and "error" in holdings:
+             raise HTTPException(status_code=400, detail=holdings["error"])
+             
+        # 2. Update Portfolio Engine
+        result = portfolio_manager.sync_hdfc_trades(holdings, current_user.email)
+        
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

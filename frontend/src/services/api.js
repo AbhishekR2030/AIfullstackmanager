@@ -95,4 +95,24 @@ export const fetchDiscoveryScan = async () => {
     }
 }
 
+export const getHDFCLoginUrl = async () => {
+    try {
+        const response = await api.get('/auth/hdfc/login');
+        return response.data.login_url;
+    } catch (error) {
+        console.error("Error getting HDFC login URL:", error);
+        return null;
+    }
+}
+
+export const syncHDFCPortfolio = async () => {
+    try {
+        const response = await api.post('/portfolio/sync/hdfc');
+        return response.data;
+    } catch (error) {
+        console.error("Error syncing HDFC portfolio:", error);
+        throw error;
+    }
+}
+
 export default api;

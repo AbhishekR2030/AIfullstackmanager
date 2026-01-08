@@ -44,10 +44,40 @@ class PortfolioEngine:
     def add_trade(self, trade_data, user_email):
         if user_email not in self.portfolio_db:
             self.portfolio_db[user_email] = []
+        
+        # Default source to MANUAL if not specified
+        if "source" not in trade_data:
+            trade_data["source"] = "MANUAL"
             
         self.portfolio_db[user_email].append(trade_data)
         self._save_db()
         return {"message": "Trade added successfully", "trade": trade_data}
+
+    def sync_hdfc_trades(self, hdfc_trades, user_email):
+        """
+        Replaces all existing HDFC trades with the fresh batch.
+        Preserves MANUAL trades.
+        """
+        if user_email not in self.portfolio_db:
+            self.portfolio_db[user_email] = []
+
+        # 1. Separate existing manual trades
+        current_portfolio = self.portfolio_db[user_email]
+        manual_trades = [t for t in current_portfolio if t.get("source") != "HDFC"]
+        
+        # 2. Merge with new HDFC trades
+        # hdfc_trades is expected to be a list of trade dicts
+        updated_portfolio = manual_trades + hdfc_trades
+        
+        self.portfolio_db[user_email] = updated_portfolio
+        self._save_db()
+        
+        return {
+            "message": "Portfolio synced with HDFC", 
+            "added_count": len(hdfc_trades),
+            "total_count": len(updated_portfolio)
+        }
+
 
     def delete_trade(self, ticker, user_email):
         if user_email not in self.portfolio_db:

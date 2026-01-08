@@ -18,8 +18,8 @@ We will host the Python API on Render.
     *   **Region**: `Singapore` (or distinct/default)
     *   **Root Directory**: `backend`  <-- **MAKE SURE TO SET THIS**
     *   **Runtime**: **Python 3**
-    *   **Build Command**: `pip install -r requirements.txt`
-    *   **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+    *   **Build Command**: `pip3 install -U -r requirements.txt`
+    *   **Start Command**: `python3 -m uvicorn main:app --host 0.0.0.0 --port $PORT`
     *   **Plan Type**: Select **Free**.
 4.  **Environment Variables**:
     *   Scroll down to "Environment Variables" and click "Add Environment Variable".
