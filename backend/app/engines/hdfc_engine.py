@@ -160,6 +160,7 @@ class HDFCEngine:
             # { "status": "success", "data": [ { "security_id": "TARSONSEQ", "isin": "...", ... } ] }
             
             holdings = []
+            aggregated_holdings = {}
             portfolio_list = data.get("data", [])
             
             # If the response structure is different (e.g. root list), adapt here
@@ -204,16 +205,33 @@ class HDFCEngine:
                 buy_date = item.get("date", datetime.now().strftime("%Y-%m-%d"))
 
                 # Filter out zero quantity (sold positions)
-                if qty > 0:
-                    holdings.append({
-                        "ticker": ticker,
-                        "quantity": int(qty),
-                        "buy_price": price,
-                        "buy_date": buy_date,
-                        "source": "HDFC"
-                    })
+                if qty > 0.01:
+                    # Aggregation Key: Use Ticker
+                    if ticker in aggregated_holdings:
+                        # Update weighted average price and total quantity
+                        existing = aggregated_holdings[ticker]
+                        total_qty = existing["quantity"] + qty
+                        total_cost = (existing["quantity"] * existing["buy_price"]) + (qty * price)
+                        existing["quantity"] = total_qty
+                        existing["buy_price"] = total_cost / total_qty
+                        # Keep earliest buy_date or latest? HDFC doesn't give lot dates well here.
+                    else:
+                        aggregated_holdings[ticker] = {
+                            "ticker": ticker,
+                            "quantity": qty,
+                            "buy_price": price,
+                            "buy_date": buy_date,
+                            "source": "HDFC"
+                        }
             
-            return holdings
+            # Convert aggregated dict back to list
+            # Round quantity to integer if it's close (Indian stocks usually int)
+            final_holdings = []
+            for t, data in aggregated_holdings.items():
+                data["quantity"] = int(data["quantity"])
+                final_holdings.append(data)
+                
+            return final_holdings
 
         except Exception as e:
             print(f"HDFC Engine Exception: {e}")
