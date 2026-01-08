@@ -168,40 +168,46 @@ class HDFCEngine:
 
             for item in portfolio_list:
                 # Extract fields
-                # Observed keys: 'security_id' (e.g. TARSONSEQ), 'company_name', 'isin'
+                # IMPROVED MAPPING: Prioritize standard symbols over internal security_id
                 
-                raw_symbol = item.get("security_id", "")
+                # Check for standard exchange symbols first
+                raw_ticker = item.get("trading_symbol") or item.get("symbol") or item.get("nse_symbol")
+                
+                # Fallback to security_id (often legacy namings like MUNDRAPORT)
+                if not raw_ticker:
+                     raw_ticker = item.get("security_id", "")
+
                 company = item.get("company_name", "")
                 
-                # Heuristic: strip 'EQ' suffix from security_id
-                # e.g. TARSONSEQ -> TARSONS
-                ticker = raw_symbol
-                if ticker.endswith("EQ"):
-                    ticker = ticker[:-2]
-                
-                # Fallback to symbol/trading_symbol if security_id not mostly useful
-                if not ticker:
-                     ticker = item.get("symbol") or item.get("trading_symbol")
-
-                # Cleanup Ticker: HDFC might return "RELIANCE-EQ". Yahoo needs "RELIANCE.NS"
+                ticker = raw_ticker
                 if ticker:
                     ticker = ticker.upper()
+                    # Remove common suffixes from HDFC
+                    for suffix in ["-EQ", "EQ", "BE", "-BE", "BZ", "-BZ"]:
+                        if ticker.endswith(suffix):
+                             ticker = ticker[:-len(suffix)]
+                             break
+                    
+                    # Yahoo Finance usually needs .NS for NSE
                     if not ticker.endswith(".NS") and not ticker.endswith(".BO"):
-                        # Heuristic: Default to .NS for Indian stocks
-                        ticker = f"{ticker}.NS"
+                         ticker = f"{ticker}.NS"
                 else:
-                    ticker = f"ISIN-{item.get('isin', 'UNKNOWN')}"
+                     ticker = f"ISIN-{item.get('isin', 'UNKNOWN')}"
 
-                qty = int(float(item.get("quantity", 0))) # Handle "10.0" as string or float
+                # Ensure Quantity is valid
+                try:
+                    qty = float(item.get("quantity", 0))
+                except:
+                    qty = 0
+
                 price = float(item.get("average_price", 0.0))
-                
-                # Date: API usually doesn't give specific lot dates in summary.
                 buy_date = item.get("date", datetime.now().strftime("%Y-%m-%d"))
 
+                # Filter out zero quantity (sold positions)
                 if qty > 0:
                     holdings.append({
                         "ticker": ticker,
-                        "quantity": qty,
+                        "quantity": int(qty),
                         "buy_price": price,
                         "buy_date": buy_date,
                         "source": "HDFC"
