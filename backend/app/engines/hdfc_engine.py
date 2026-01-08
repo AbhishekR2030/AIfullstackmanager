@@ -62,6 +62,7 @@ class HDFCEngine:
         Exchanges the request_token (received after login) for an access_token.
         """
         if not self.api_key or not self.api_secret:
+             print("HDFC Exchange Error: Missing credentials")
              return {"error": "Missing credentials"}
              
         url = f"{self.base_url}/access-token"
@@ -71,22 +72,40 @@ class HDFCEngine:
         
         # HDFC typically expects specific body or form params
         # Providing api_key in query and secret in body/params
+        # CRITICAL FIX: Ensure keys match HDFC spec exactly.
+        # Some docs suggest 'apiSecret' in body.
+        
         params = { "api_key": self.api_key, "request_token": request_token }
         body = { "apiSecret": self.api_secret }
         
+        print(f"Exchanging Token. URL: {url}, Params: {params}") # Debug Log
+        
         try:
              # Try sending secret in body (common for some providers)
+             # Also try passing redirect_url if strictly required, though usually needed for code grant
+             
              response = requests.post(url, params=params, json=body, headers=headers)
+             
+             print(f"HDFC Token Response: {response.status_code} - {response.text}") # Debug Log
+
+             if response.status_code != 200:
+                  return {"error": f"HDFC API Error: {response.status_code} {response.text}"}
+
              data = response.json()
              
              if "access_token" in data:
                   self.access_token = data["access_token"]
                   # Ideally save this to DB/Session
                   return {"success": True, "access_token": self.access_token}
+             elif "data" in data and "access_token" in data["data"]:
+                  # Handle nested response if applicable
+                  self.access_token = data["data"]["access_token"]
+                  return {"success": True, "access_token": self.access_token}
              else:
-                  return {"error": f"Token exchange failed: {data}"}
+                  return {"error": f"Token exchange failed. No access_token in response: {data}"}
                   
         except Exception as e:
+             print(f"HDFC Exchange Exception: {e}")
              return {"error": str(e)}
 
     def fetch_holdings(self):
