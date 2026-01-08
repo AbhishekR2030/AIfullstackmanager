@@ -93,6 +93,17 @@ class PortfolioEngine:
         self._save_db()
         return {"message": "Trade deleted successfully", "success": True}
 
+    def _sanitize_float(self, val):
+        import math
+        if val is None: return 0.0
+        try:
+            f_val = float(val)
+            if math.isnan(f_val) or math.isinf(f_val):
+                return 0.0
+            return f_val
+        except:
+            return 0.0
+
     def get_portfolio(self, user_email):
         """
         Returns portfolio with live metrics for specific user.
@@ -142,18 +153,21 @@ class PortfolioEngine:
                     pass
 
             # 3. Calculate Metrics
+            # Sanitize current price first
+            current_price = self._sanitize_float(current_price)
+            
             total_value = current_price * qty
             invested_value = buy_price * qty
             pl_amount = total_value - invested_value
-            pl_percent = ((current_price - buy_price) / buy_price) * 100 if buy_price else 0
+            pl_percent = ((current_price - buy_price) / buy_price) * 100 if buy_price and buy_price != 0 else 0
 
             # 4. Construct Safe Response
             enriched_portfolio.append({
                 **trade,
                 "current_price": round(current_price, 2),
-                "total_value": round(total_value, 2),
-                "pl_amount": round(pl_amount, 2),
-                "pl_percent": round(pl_percent, 2)
+                "total_value": round(self._sanitize_float(total_value), 2),
+                "pl_amount": round(self._sanitize_float(pl_amount), 2),
+                "pl_percent": round(self._sanitize_float(pl_percent), 2)
             })
             
         return enriched_portfolio
