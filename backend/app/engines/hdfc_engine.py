@@ -45,7 +45,8 @@ class HDFCEngine:
         # NO, HDFC Must support standard OAuth redirect if they ask for `redirect_url` in app creation.
         
         # Let's try constructing the standard URL.
-        target_uri = redirect_uri or "https://alphaseeker-backend.onrender.com/api/v1/auth/callback"
+        # User confirmed that only the frontend URL was accepted in the portal.
+        target_uri = redirect_uri or "https://alphaseeker.vercel.app"
         
         # URL Encoded redirect_uri
         import urllib.parse

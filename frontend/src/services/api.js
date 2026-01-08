@@ -105,6 +105,16 @@ export const getHDFCLoginUrl = async () => {
     }
 }
 
+export const handleHDFCCallback = async (requestToken) => {
+    try {
+        const response = await api.get(`/auth/callback?request_token=${requestToken}`);
+        return response.data;
+    } catch (error) {
+        console.error("Error handling HDFC callback:", error);
+        throw error;
+    }
+}
+
 export const syncHDFCPortfolio = async () => {
     try {
         const response = await api.post('/portfolio/sync/hdfc');

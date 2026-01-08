@@ -1,11 +1,40 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Link, useLocation, useNavigate, Outlet } from 'react-router-dom';
+import { handleHDFCCallback, syncHDFCPortfolio } from '../services/api';
 import { LayoutDashboard, Telescope, PieChart, LogOut } from 'lucide-react';
 import './Layout.css';
 
 const Layout = ({ children }) => {
     const location = useLocation();
     const navigate = useNavigate();
+
+    useEffect(() => {
+        const checkForHDFCToken = async () => {
+            const params = new URLSearchParams(location.search);
+            const requestToken = params.get('requestToken') || params.get('request_token');
+
+            if (requestToken) {
+                try {
+                    console.log("Found HDFC Token, processing...", requestToken);
+                    // 1. Send to backend to exchange for access token
+                    await handleHDFCCallback(requestToken);
+
+                    // 2. Trigger a sync immediately
+                    await syncHDFCPortfolio();
+
+                    alert("HDFC Login Successful! Portfolio Synced.");
+
+                    // 3. Clear the URL
+                    navigate(location.pathname, { replace: true });
+                } catch (error) {
+                    console.error("HDFC Callback Error:", error);
+                    alert("Failed to complete HDFC Login.");
+                }
+            }
+        };
+
+        checkForHDFCToken();
+    }, [location, navigate]);
 
     const isActive = (path) => location.pathname === path ? 'active' : '';
 
