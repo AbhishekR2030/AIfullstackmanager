@@ -149,14 +149,15 @@ class HDFCEngine:
 
             response = requests.get(url, headers=headers, params=params, timeout=10)
             
-            if response.status_code != 200:
+            # Allow 200 and 201 as success
+            if response.status_code not in [200, 201]:
                 print(f"HDFC API Error: {response.status_code} - {response.text}")
                 return {"error": f"Failed to fetch holdings: {response.status_code}"}
 
             data = response.json()
             # Parse data
-            # Structure based on search results:
-            # { "data": [ { "symbol": "...", "quantity": ..., "average_price": ... } ] }
+            # Structure observed in logs:
+            # { "status": "success", "data": [ { "security_id": "TARSONSEQ", "isin": "...", ... } ] }
             
             holdings = []
             portfolio_list = data.get("data", [])
@@ -167,11 +168,21 @@ class HDFCEngine:
 
             for item in portfolio_list:
                 # Extract fields
-                # We need to map 'company_name' or 'security_id' to a Ticker.
-                # Ideally the API returns 'isin' or 'symbol'. 
-                # Let's assume 'trading_symbol' or 'symbol' is present.
-                ticker = item.get("symbol") or item.get("trading_symbol")
+                # Observed keys: 'security_id' (e.g. TARSONSEQ), 'company_name', 'isin'
                 
+                raw_symbol = item.get("security_id", "")
+                company = item.get("company_name", "")
+                
+                # Heuristic: strip 'EQ' suffix from security_id
+                # e.g. TARSONSEQ -> TARSONS
+                ticker = raw_symbol
+                if ticker.endswith("EQ"):
+                    ticker = ticker[:-2]
+                
+                # Fallback to symbol/trading_symbol if security_id not mostly useful
+                if not ticker:
+                     ticker = item.get("symbol") or item.get("trading_symbol")
+
                 # Cleanup Ticker: HDFC might return "RELIANCE-EQ". Yahoo needs "RELIANCE.NS"
                 if ticker:
                     ticker = ticker.upper()
@@ -179,14 +190,12 @@ class HDFCEngine:
                         # Heuristic: Default to .NS for Indian stocks
                         ticker = f"{ticker}.NS"
                 else:
-                    ticker = "UNKNOWN"
+                    ticker = f"ISIN-{item.get('isin', 'UNKNOWN')}"
 
-                qty = int(item.get("quantity", 0))
+                qty = int(float(item.get("quantity", 0))) # Handle "10.0" as string or float
                 price = float(item.get("average_price", 0.0))
                 
                 # Date: API usually doesn't give specific lot dates in summary.
-                # We will use today's date or a specific "imported" date.
-                # Or check if 'transaction_date' exists.
                 buy_date = item.get("date", datetime.now().strftime("%Y-%m-%d"))
 
                 if qty > 0:
