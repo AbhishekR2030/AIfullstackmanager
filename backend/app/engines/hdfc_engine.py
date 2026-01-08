@@ -93,13 +93,19 @@ class HDFCEngine:
 
              data = response.json()
              
-             if "access_token" in data:
-                  self.access_token = data["access_token"]
-                  # Ideally save this to DB/Session
-                  return {"success": True, "access_token": self.access_token}
-             elif "data" in data and "access_token" in data["data"]:
+             data = response.json()
+             
+             # FIX: Handle camelCase 'accessToken' from HDFC
+             token = data.get("access_token") or data.get("accessToken")
+             
+             if not token and "data" in data and isinstance(data["data"], dict):
                   # Handle nested response if applicable
-                  self.access_token = data["data"]["access_token"]
+                  token = data["data"].get("access_token") or data["data"].get("accessToken")
+
+             if token:
+                  self.access_token = token
+                  # Ideally save this to DB/Session so it persists across requests (for simple app, in-memory is fragile but okay for immediate sync)
+                  print(f"Token Exchange Success. Token Length: {len(self.access_token)}")
                   return {"success": True, "access_token": self.access_token}
              else:
                   return {"error": f"Token exchange failed. No access_token in response: {data}"}
