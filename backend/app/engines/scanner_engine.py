@@ -121,28 +121,81 @@ class MarketScanner:
         except:
             return ticker, {}
 
+    def _fetch_perplexity_fundamentals(self, ticker, region="IN"):
+        """
+        Fetches fundamental data using Perplexity API (Sonar-Pro/Reasoning).
+        """
+        import os
+        import requests
+        import json
+        
+        api_key = os.getenv("PERPLEXITY_API_KEY")
+        if not api_key:
+            print("Perplexity API Key missing. Skipping fundamentals.")
+            return {}
+
+        market_context = "National Stock Exchange of India (NSE)" if region == "IN" else "US Stock Market"
+        
+        prompt = f"""
+        Get the latest financial data for {ticker} listed on {market_context}.
+        Return a STRICT JSON object with these exact keys:
+        - revenue_growth_yoy: (decimal, e.g. 0.15 for 15%)
+        - return_on_equity: (decimal, e.g. 0.20 for 20%)
+        - debt_to_equity: (decimal ratio)
+        - sector: (string)
+        - beta: (decimal)
+        
+        If exact recent data is unavailable, estimate from the latest annual report. 
+        Evaluate 'revenue_growth_yoy' based on the last 4 quarters vs previous 4 quarters if possible.
+        """
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "sonar-pro", 
+            "messages": [
+                {"role": "system", "content": "You are a financial data assistant. Return ONLY JSON. No markdown formatting."},
+                {"role": "user", "content": prompt}
+            ]
+        }
+        
+        try:
+            response = requests.post("https://api.perplexity.ai/chat/completions", json=payload, headers=headers, timeout=10)
+            if response.status_code == 200:
+                content = response.json()['choices'][0]['message']['content']
+                # Clean code block formatting if present
+                content = content.replace("```json", "").replace("```", "").strip()
+                return json.loads(content)
+            else:
+                print(f"Perplexity Error {response.status_code}: {response.text}")
+                return {}
+        except Exception as e:
+            print(f"Perplexity Exception for {ticker}: {e}")
+            return {}
+
     def scan_market(self, region="IN"):
         print(f"Starting Scan ({region})...")
         tickers = self.loader.get_india_tickers() if region == "IN" else self.loader.get_us_tickers()
         
-        # 1. Batch Fetch History
-        # Reduced to 3mo for speed
+        # 1. Batch Fetch History (Technicals via Yahoo - Reliable)
         data = self.loader.fetch_data(tickers, period="3mo")
         if data is None or data.empty: return []
 
-        # 2. Tech Screen Only (Fast)
+        # 2. Tech Screen 
         tech_pass_candidates = []
         usd_inr = 85.0
         
-        # ... (Tech logic remains same)
-
+        print(f"Tech screening {len(tickers)} assets...")
+        
         for ticker in tickers:
              try:
-                # Handle MultiIndex
                 df = data[ticker].dropna() if len(tickers) > 1 else data
                 if df.empty or len(df) < 55: continue
                 
-                # ... (Tech filters same as before)
+                # Technical Checks
                 current_price = df['Close'].iloc[-1]
                 avg_vol_20 = df['Volume'].rolling(20).mean().iloc[-1]
                 
@@ -170,43 +223,80 @@ class MarketScanner:
                 hist = macd['MACDh_12_26_9'].iloc[-1]
                 if hist <= 0: continue
                 
-                tech_score = rsi
-                
                 tech_pass_candidates.append({
                     "ticker": ticker,
                     "df": df, 
                     "price": current_price,
-                    "tech_score": tech_score,
+                    "tech_score": rsi,
                     "rsi": rsi,
                     "vol_shock": current_vol/avg_vol_20
                 })
              except: continue
 
-        # 3. Sort & Slice
+        # 3. Select Top 5 for Fundamental Analysis
         tech_pass_candidates.sort(key=lambda x: x['vol_shock'], reverse=True)
         top_candidates = tech_pass_candidates[:5]
         
         if not top_candidates: return []
         
-        # 4. Return Technical Candidates Directly (Fast Mode)
-        # Deep fundamental checks via yfinance.info are too unstable/slow for Cloud IPs
-        # We rely on the "Momentum" and "Volume Shock" as the primary signal.
-        print("Returning Top 5 Technical Candidates (Speed Mode)...")
+        # 4. Fetch Fundamentals via Perplexity (Sequential)
+        print("Fetching fundamentals via Perplexity API...")
         final_list = []
         
         for cand in top_candidates:
-             # Basic Data Construction
-             # Note: We skip deep 'info' calls (ROE/Growth) to guarantee sub-5s response.
-             final_list.append({
-                "ticker": cand['ticker'],
+            ticker = cand['ticker']
+            print(f"Analyzing Fundamentals: {ticker}")
+            
+            # Fetch Data
+            p_data = self._fetch_perplexity_fundamentals(ticker, region)
+            
+            # Construct Info Object for Scoring
+            # We map Perplexity keys to what our scoring engine expects
+            info_proxy = {
+                'quoteType': 'EQUITY', # Assumption
+                'revenueGrowth': p_data.get('revenue_growth_yoy', 0),
+                'returnOnEquity': p_data.get('return_on_equity', 0),
+                'debtToEquity': (p_data.get('debt_to_equity', 0) or 0) * 100, # Yahoo uses %
+                'sector': p_data.get('sector', 'Unknown'),
+                'beta': p_data.get('beta', 1.0),
+                'targetMeanPrice': cand['price'] * 1.2 # specific target unavailable via quick api usually
+            }
+            
+            # Fundamental Check Logic
+            passed = True
+            reason = "Passed"
+            
+            # Equity Logic ( Simplified Version of _check_fundamentals )
+            if info_proxy['revenueGrowth'] < 0.15:
+                passed = False; reason = f"Low Growth: {info_proxy['revenueGrowth']}"
+            elif info_proxy['returnOnEquity'] < 0.18:
+                passed = False; reason = f"Low ROE: {info_proxy['returnOnEquity']}"
+            elif info_proxy['debtToEquity'] > 40: # 0.4 ratio = 40
+                passed = False; reason = f"High Debt: {info_proxy['debtToEquity']}"
+            
+            # Allow purely momentum plays if score is super high? 
+            # User said "incorporate logic". We must flag it.
+            # But to ensure we don't return empty list for now, we include but penalize score?
+            # Or strict filtering? "Fundamental Safety Check" implies strict.
+            
+            if not passed:
+                print(f"Fundamental Reject {ticker}: {reason}")
+                continue
+
+            score = self._calculate_upside_score(cand['df'], info_proxy, region)
+            
+            final_list.append({
+                "ticker": ticker,
                 "price": round(cand['price'], 2),
-                "score": round(cand['tech_score'], 2), # Using RSI/Tech score
+                "score": score,
                 "rsi": round(cand['rsi'], 2),
                 "vol_shock": round(cand['vol_shock'], 2),
-                "sector": "Momentum", # Placeholder
-                "beta": 1.0
-             })
+                "sector": info_proxy['sector'],
+                "beta": info_proxy['beta']
+            })
 
+        # 5. Final Sort
+        final_list.sort(key=lambda x: x['score'], reverse=True)
         return final_list
 
 scanner = MarketScanner()
