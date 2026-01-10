@@ -110,10 +110,19 @@ class MarketScanner:
             
             val_score = np.clip(upside_pct * 500, 0, 100)
             total_score = (fund_score * 0.4) + (mom_score * 0.3) + (val_score * 0.3)
-            return round(total_score, 2)
+            
+            return {
+                "total_score": round(total_score, 2),
+                "upside_pct": round(upside_pct * 100, 1),
+                "momentum_score": round(mom_score, 1)
+            }
             
         except:
-            return 50.0
+            return {
+                "total_score": 50.0,
+                "upside_pct": 0.0,
+                "momentum_score": 50.0
+            }
 
     def get_info_threaded(self, ticker):
         try:
@@ -289,12 +298,14 @@ class MarketScanner:
                 print(f"Fundamental Reject {ticker}: {reason}")
                 continue
 
-            score = self._calculate_upside_score(cand['df'], info_proxy, region)
+            score_data = self._calculate_upside_score(cand['df'], info_proxy, region)
             
             final_list.append({
                 "ticker": ticker,
                 "price": round(cand['price'], 2),
-                "score": score,
+                "score": score_data['total_score'],
+                "upside_potential": score_data['upside_pct'],
+                "momentum_score": score_data['momentum_score'],
                 "rsi": round(cand['rsi'], 2),
                 "vol_shock": round(cand['vol_shock'], 2),
                 "sector": info_proxy['sector'],

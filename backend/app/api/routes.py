@@ -231,6 +231,23 @@ async def scan_opportunities(current_user = Depends(get_current_user)):
         user_portfolio = portfolio_manager.get_portfolio(current_user.email)
         analyzed_holdings = rebalancer.analyze_portfolio(user_portfolio)
         
+        # --- Generate Thesis for Top Pick (AUTO) ---
+        if buy_candidates:
+            top_pick = buy_candidates[0]
+            # Check if thesis already exists or generate it
+            if "thesis" not in top_pick:
+                print(f"Generating Investment Thesis for Top Pick: {top_pick['ticker']}...")
+                try:
+                    # This call uses Gemini 2.0 Flash (Fast)
+                    analysis = analyst.generate_thesis(top_pick['ticker'])
+                    if "error" not in analysis:
+                        top_pick["thesis"] = analysis.get("thesis", [])
+                        top_pick["risk_factors"] = analysis.get("risk_factors", [])
+                        top_pick["recommendation"] = analysis.get("recommendation", "BUY")
+                        top_pick["confidence"] = analysis.get("confidence_score", 0)
+                except Exception as e:
+                    print(f"Thesis Generation Failed: {e}")
+
         # 3. Generate Recommendations
         recommendations = {
             "buy_candidates": buy_candidates,
