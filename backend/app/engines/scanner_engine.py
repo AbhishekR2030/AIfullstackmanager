@@ -126,20 +126,23 @@ class MarketScanner:
         tickers = self.loader.get_india_tickers() if region == "IN" else self.loader.get_us_tickers()
         
         # 1. Batch Fetch History
-        data = self.loader.fetch_data(tickers, period="6mo")
+        # Reduced to 3mo for speed
+        data = self.loader.fetch_data(tickers, period="3mo")
         if data is None or data.empty: return []
 
         # 2. Tech Screen Only (Fast)
         tech_pass_candidates = []
         usd_inr = 85.0
         
-        print(f"Tech screening {len(tickers)} assets...")
-        
+        # ... (Tech logic remains same)
+
         for ticker in tickers:
-            try:
+             try:
+                # Handle MultiIndex
                 df = data[ticker].dropna() if len(tickers) > 1 else data
                 if df.empty or len(df) < 55: continue
                 
+                # ... (Tech filters same as before)
                 current_price = df['Close'].iloc[-1]
                 avg_vol_20 = df['Volume'].rolling(20).mean().iloc[-1]
                 
@@ -167,50 +170,42 @@ class MarketScanner:
                 hist = macd['MACDh_12_26_9'].iloc[-1]
                 if hist <= 0: continue
                 
-                # Calculate Interim Tech Score for Sorting
-                tech_score = rsi # Simple proxy or calc full tech score
+                tech_score = rsi
                 
                 tech_pass_candidates.append({
                     "ticker": ticker,
-                    "df": df, # Keep ref
+                    "df": df, 
                     "price": current_price,
                     "tech_score": tech_score,
                     "rsi": rsi,
                     "vol_shock": current_vol/avg_vol_20
                 })
-                
-            except:
-                continue
-        
+             except: continue
+
         print(f"Passed Tech Screen: {len(tech_pass_candidates)}")
         
-        # 3. Sort & Slice (Limit to Top 10 to avoid API timeouts)
-        tech_pass_candidates.sort(key=lambda x: x['vol_shock'], reverse=True) # or tech_score
+        # 3. Sort & Slice (Limit to Top 10)
+        tech_pass_candidates.sort(key=lambda x: x['vol_shock'], reverse=True)
         top_candidates = tech_pass_candidates[:10]
         
         if not top_candidates: return []
         
-        # 4. Fetch Fundamentals for Top 10 Only (Threaded)
-        print("Fetching fundamentals for top candidates...")
+        # 4. Fetch Fundamentals (Threaded)
+        print("Fetching fundamentals threaded...")
         final_list = []
         
-        # Just loop for safety against rate limits, or use limited threading
-        # Using loop is safer for yahoo than parallel
-        for cand in top_candidates:
-            ticker = cand['ticker']
+        def process_candidate(cand):
             try:
+                ticker = cand['ticker']
                 t_obj = yf.Ticker(ticker)
-                # This is the slow part
-                info = t_obj.info 
+                info = t_obj.info
                 
                 passed, reason = self._check_fundamentals(ticker, info, region)
-                if not passed:
-                    # print(f"Fund reject {ticker}: {reason}")
-                    continue
-                    
+                if not passed: return None
+                
                 score = self._calculate_upside_score(cand['df'], info, region)
                 
-                final_list.append({
+                return {
                     "ticker": ticker,
                     "price": round(cand['price'], 2),
                     "score": score,
@@ -218,10 +213,14 @@ class MarketScanner:
                     "vol_shock": round(cand['vol_shock'], 2),
                     "sector": info.get('sector', 'Unknown'),
                     "beta": info.get('beta', 1.0)
-                })
-            except Exception as e:
-                print(f"Error fetching info for {ticker}: {e}")
-                continue
+                }
+            except:
+                return None
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(process_candidate, top_candidates))
+
+        final_list = [r for r in results if r is not None]
 
         # 5. Final Sort
         final_list.sort(key=lambda x: x['score'], reverse=True)
