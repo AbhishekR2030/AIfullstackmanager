@@ -13,10 +13,13 @@ class AnalystEngine:
             print("Warning: GOOGLE_API_KEY not found in environment variables.")
 
         # Priority List: Try powerful models first, fallback to reliable/fast ones
+        # Priority List: Try powerful models first, fallback to reliable/fast ones
+        # Priority List: Try powerful models first, fallback to reliable/fast ones
         self.models = [
-            'models/gemini-2.0-flash',      # 1. Newest High Performance
-            'models/gemini-1.5-pro',        # 2. High Reasoning (if available)
-            'models/gemini-1.5-flash',      # 3. High Quota / Stability Workhorse
+            'models/gemini-2.0-flash-001',  # 1. User Selected
+            'models/gemini-2.0-flash',      # 2. Alternates
+            'models/gemini-flash-latest',   # 3. Fallback (Flash 1.5)
+            'models/gemini-pro-latest',     # 4. Fallback (Pro 1.5)
         ]
 
     # ... (fetch_market_data, fetch_news, get_macro_data remain same)
@@ -31,7 +34,7 @@ class AnalystEngine:
 
         prompt = f"""
         You are a Citadel Quant Researcher focusing on the Indian Market.
-        Analyze the following asset: {ticker_symbol}
+        Analyze the following asset for a High-Alpha Swing Trade (>3% Monthly potential): {ticker_symbol}
 
         **Market Data:**
         {json.dumps(data, default=str)}
@@ -46,8 +49,8 @@ class AnalystEngine:
         Provide a structured investment thesis. 
         Output STRICT JSON format with the following keys:
         - recommendation: "Buy", "Sell", or "Hold"
-        - thesis: [list of 3 bullet points]
-        - risk_factors: [list of risks]
+        - thesis: [List of 3 distinct reasons for selection (Key Drivers)]
+        - risk_factors: [List of 3 specific reasons why this prediction could go WRONG (Bear Case)]
         - confidence_score: (0-100 integer)
         """
 

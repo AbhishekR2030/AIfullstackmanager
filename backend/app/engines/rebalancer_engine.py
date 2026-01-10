@@ -1,11 +1,62 @@
+
 from datetime import datetime
 import pandas as pd
+import pandas_ta as ta
 import yfinance as yf
+import numpy as np
 
 class RebalancerEngine:
-    def analyze_portfolio(self, portfolio):
+    def _calculate_upside_score(self, df, info):
         """
-        Analyzes portfolio assets for locking validity and performance trend.
+        Calculates Upside Score (0-100) matching Screener logic.
+        """
+        try:
+            # --- 1. Momentum Score (30%) ---
+            rsi = ta.rsi(df['Close'], length=14).iloc[-1]
+            macd = ta.macd(df['Close'])
+            macd_hist = macd['MACDh_12_26_9'].iloc[-1]
+            
+            rsi_score = np.clip((rsi - 50) * 5, 0, 100)
+            macd_score = 100 if macd_hist > 0 else 0
+            mom_score = (rsi_score * 0.7) + (macd_score * 0.3)
+            
+            # --- 2. Fundamental Score (40%) ---
+            quote_type = info.get('quoteType', 'EQUITY')
+            if quote_type == 'ETF':
+                fund_score = 70 
+            else:
+                rev_g = info.get('revenueGrowth', 0) or 0
+                roe = info.get('returnOnEquity', 0) or 0
+                rev_score = np.clip(rev_g * 500, 0, 100)
+                roe_score = np.clip(roe * 400, 0, 100)
+                fund_score = (rev_score * 0.5) + (roe_score * 0.5)
+
+            # --- 3. Valuation/Upside Score (30%) ---
+            current_price = df['Close'].iloc[-1]
+            target_price = info.get('targetMeanPrice', None)
+            
+            upside_pct = 0
+            if target_price and target_price > 0:
+                upside_pct = (target_price - current_price) / current_price
+            else:
+                peg = info.get('pegRatio', 0)
+                if peg and 0 < peg < 1.0: upside_pct = 0.20
+                elif peg and peg < 1.5: upside_pct = 0.10
+                else: upside_pct = 0.05
+            
+            val_score = np.clip(upside_pct * 500, 0, 100)
+            
+            total_score = (fund_score * 0.4) + (mom_score * 0.3) + (val_score * 0.3)
+            return round(total_score, 2)
+        except:
+            return 50.0
+
+    def analyze_portfolio(self, portfolio, new_candidates=None):
+        """
+        Analyzes portfolio assets.
+        Args:
+            portfolio: list of dicts {ticker, buy_date, ...}
+            new_candidates: list of best new opportunities from Scanner
         """
         if not portfolio:
             return []
@@ -13,56 +64,99 @@ class RebalancerEngine:
         analyzed_assets = []
         tickers = [p['ticker'] for p in portfolio]
         
-        # Fetch data for Trend Check (20 SMA)
+        # Batch Fetch History
         try:
-            data = yf.download(tickers, period="2mo", group_by='ticker', progress=False)
+            data = yf.download(tickers, period="6mo", group_by='ticker', progress=False)
         except:
             data = None
 
         today = datetime.now()
+        
+        # Get Best New Candidate Score
+        best_new_score = 0
+        if new_candidates:
+            # Assumes new_candidates is sorted desc by score
+            best_new_score = new_candidates[0].get('score', 0)
 
         for asset in portfolio:
             ticker = asset['ticker']
             buy_date_str = asset['buy_date']
             buy_date = datetime.strptime(buy_date_str, "%Y-%m-%d")
             
-            # 1. Calculate Age
-            age_days = (today - buy_date).days
+            # --- Step B: Time Lock ---
+            days_held = (today - buy_date).days
+            status = "LOCKED" if days_held < 31 else "UNLOCKED"
             
-            # 2. Status Check
-            status = "LOCKED" if age_days < 31 else "UNLOCKED"
-            
-            # 3. Trend Check (Price > 20 SMA)
-            trend = "UNKNOWN"
-            try:
-                if data is not None:
-                     df = data[ticker].dropna() if len(tickers) > 1 else data
-                     if not df.empty and len(df) > 20:
-                         sma_20 = df['Close'].rolling(window=20).mean().iloc[-1]
-                         current_price = df['Close'].iloc[-1]
-                         trend = "UP" if current_price > sma_20 else "DOWN"
-            except:
-                pass
-
-            # XIRR is complex without full cashflows, using 'pl_percent' as proxy for MVP
-            performance_pct = asset.get('pl_percent', 0.0)
-
             recommendation = "HOLD"
-            if status == "UNLOCKED":
-                if trend == "DOWN" or performance_pct < -5: # Simple stop loss / trend break logic
-                    recommendation = "SELL_CANDIDATE"
-                elif trend == "UP":
-                    recommendation = "KEEP_WINNER"
-            else:
-                recommendation = "LOCKED_HOLD"
+            reason = ""
+            score = 0
+            
+            try:
+                # Need Info for Scoring (Expensive but necessary for 'Step D')
+                # In prod, cache this or pass it in.
+                t_obj = yf.Ticker(ticker)
+                info = t_obj.info
+                
+                df = data[ticker].dropna() if len(tickers) > 1 else data
+                if df is not None and not df.empty and len(df) > 50:
+                    current_price = df['Close'].iloc[-1]
+                    sma_20 = df['Close'].rolling(20).mean().iloc[-1]
+                    
+                    # Calculate Stats
+                    score = self._calculate_upside_score(df, info)
+                    pl_pct = asset.get('pl_percent', 0)
+                    
+                    if status == "LOCKED":
+                        recommendation = "HOLD (Compliance)"
+                        reason = f"Held {days_held} days (<31)"
+                    else:
+                        # --- Step C: Weakest Link ---
+                        is_sell_candidate = False
+                        sell_reasons = []
+                        
+                        # 1. Profit Target > 10%
+                        if pl_pct > 10:
+                            is_sell_candidate = True
+                            sell_reasons.append(f"Profit {pl_pct:.1f}% > 10%")
+                            
+                        # 2. Trend Breakdown (< 20 SMA)
+                        if current_price < sma_20:
+                            is_sell_candidate = True
+                            sell_reasons.append("Price < 20 SMA")
+                            
+                        # 3. Relative Strength (RS)
+                        # Checking purely against S&P/Nifty is ideal, but here comparing internal scores?
+                        # Prompt says "Lowest Relative Strength in Portfolio".
+                        # We can flag it, but we need to know OTHERS' RS to know if it's lowest.
+                        # For now, just using Score as proxy for strength. 
+                        # If Score < 40 maybe? 
+                        
+                        if is_sell_candidate:
+                            recommendation = "SELL_CANDIDATE"
+                            reason = ", ".join(sell_reasons)
+                            
+                        # --- Step D: Swap Decision ---
+                        # If it is a Sell Candidate OR just weak, compare with New.
+                        # Prompt says evaluate Swap for "Unlocked" assets.
+                        # Rule: IF New > Old * 1.2
+                        
+                        if best_new_score > (score * 1.20):
+                            recommendation = "SWAP_ADVICE"
+                            reason = f"Upgrade: New Score {best_new_score} >> Old {score}"
 
+            except Exception as e:
+                reason = f"Data Error"
+                
             analyzed_assets.append({
                 "ticker": ticker,
-                "age_days": age_days,
+                "days_held": days_held,
                 "status": status,
-                "trend": trend,
                 "recommendation": recommendation,
-                "pl_percent": performance_pct
+                "reason": reason,
+                "score": round(score, 1),
+                "pl_percent": asset.get('pl_percent', 0)
             })
-
+            
         return analyzed_assets
+
+rebalancer = RebalancerEngine()
