@@ -155,7 +155,7 @@ class MarketScanner:
         }
         
         payload = {
-            "model": "sonar-pro", 
+            "model": "sonar", # Switched to faster model to prevent timeouts
             "messages": [
                 {"role": "system", "content": "You are a financial data assistant. Return ONLY JSON. No markdown formatting."},
                 {"role": "user", "content": prompt}
@@ -163,10 +163,10 @@ class MarketScanner:
         }
         
         try:
-            response = requests.post("https://api.perplexity.ai/chat/completions", json=payload, headers=headers, timeout=10)
+            # Increased timeout to 30s to handle API latency
+            response = requests.post("https://api.perplexity.ai/chat/completions", json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
                 content = response.json()['choices'][0]['message']['content']
-                # Clean code block formatting if present
                 content = content.replace("```json", "").replace("```", "").strip()
                 return json.loads(content)
             else:
