@@ -149,35 +149,39 @@ class RebalancerEngine:
                     score = score_data['total_score']
                     pl_pct = asset.get('pl_percent', 0)
                     
-                    if status == "LOCKED":
-                        recommendation = "HOLD" # Simple HOLD, don't scare with "Compliance" unless requested
-                        reason = f"Held {days_held} days (Lock period)"
-                    else:
-                        # --- Step C: Weakest Link ---
-                        is_sell_candidate = False
-                        sell_reasons = []
+                    # --- Step C: Weakest Link ---
+                    # We evaluate Sell/Swap potential regardless of lock, 
+                    # but flag it if locked.
+                    
+                    is_sell_candidate = False
+                    sell_reasons = []
+                    
+                    # 1. Profit Target > 20%
+                    if pl_pct > 20:
+                        is_sell_candidate = True
+                        sell_reasons.append(f"Profit {pl_pct:.1f}%")
                         
-                        # 1. Profit Target > 20% (Bumped from 10% for realistic swing)
-                        if pl_pct > 20:
-                            is_sell_candidate = True
-                            sell_reasons.append(f"Profit {pl_pct:.1f}%")
-                            
-                        # 2. Trend Breakdown (< 20 SMA)
-                        if current_price < sma_20:
-                            is_sell_candidate = True
-                            sell_reasons.append("Broken Trend (< 20 SMA)")
-                            
-                        if is_sell_candidate:
-                            recommendation = "SELL_CANDIDATE"
-                            reason = ", ".join(sell_reasons)
-                            
-                        # --- Step D: Swap Decision ---
-                        # Rule: IF New > Old * 1.5 (High conviction swap)
-                        if best_new_score > (score * 1.5):
-                             # Only suggest swap if we are NOT already selling
-                             if recommendation != "SELL_CANDIDATE":
+                    # 2. Trend Breakdown (< 20 SMA)
+                    if current_price < sma_20:
+                        is_sell_candidate = True
+                        sell_reasons.append("Broken Trend (< 20 SMA)")
+                        
+                    if is_sell_candidate:
+                        recommendation = "SELL_CANDIDATE"
+                        reason = ", ".join(sell_reasons)
+                        
+                    # --- Step D: Swap Decision (High Conviction) ---
+                    # Rule: IF New > Old * 1.5
+                    if best_new_score > (score * 1.5):
+                            if recommendation != "SELL_CANDIDATE":
                                 recommendation = "SWAP_ADVICE"
                                 reason = f"Upgrade Available: Score {best_new_score}"
+
+                    # Override if Locked (Compliance) - Optional: Disable lock for purely advisory view
+                    # User requested to RESTORE recommendations, so we relax the lock visualization
+                    if status == "LOCKED" and recommendation != "HOLD":
+                         reason += " (Note: Held < 30 days)"
+                         # We do NOT force back to HOLD, just warn. This ensures 'Swap' container appears.
 
             except Exception as e:
                 # print(f"Analysis Error for {ticker}: {e}")
@@ -185,7 +189,7 @@ class RebalancerEngine:
                 
             analyzed_assets.append({
                 "ticker": ticker,
-                "days_held": days_held,
+                "age_days": int(days_held), # Renamed from days_held to age_days for Frontend
                 "status": status,
                 "recommendation": recommendation,
                 "reason": reason,
