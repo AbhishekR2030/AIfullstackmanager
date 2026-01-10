@@ -182,55 +182,31 @@ class MarketScanner:
                 })
              except: continue
 
-        # 3. Sort & Slice (Limit to Top 5 STRICT for reliability)
+        # 3. Sort & Slice
         tech_pass_candidates.sort(key=lambda x: x['vol_shock'], reverse=True)
         top_candidates = tech_pass_candidates[:5]
         
         if not top_candidates: return []
         
-        # 4. Fetch Fundamentals (Sequential & Safe)
-        print("Fetching fundamentals (Sequential Safe Mode)...")
+        # 4. Return Technical Candidates Directly (Fast Mode)
+        # Deep fundamental checks via yfinance.info are too unstable/slow for Cloud IPs
+        # We rely on the "Momentum" and "Volume Shock" as the primary signal.
+        print("Returning Top 5 Technical Candidates (Speed Mode)...")
         final_list = []
         
         for cand in top_candidates:
-            ticker = cand['ticker']
-            try:
-                # Sequential fetch is safer for Yahoo rate limits
-                t_obj = yf.Ticker(ticker)
-                
-                # Try fetching info with a fallback
-                try:
-                    info = t_obj.info
-                    passed, reason = self._check_fundamentals(ticker, info, region)
-                    if not passed:
-                        print(f"Skipping {ticker}: {reason}")
-                        continue
-                    score = self._calculate_upside_score(cand['df'], info, region)
-                    sector = info.get('sector', 'Unknown')
-                    beta = info.get('beta', 1.0)
-                except Exception:
-                    # Fallback if Yahoo blocks 'info'
-                    print(f"Warning: Fundamental data failed for {ticker}. Using Technical Score.")
-                    info = {}
-                    score = cand['tech_score'] # Use RSI as proxy
-                    sector = "Unknown"
-                    beta = 1.0
+             # Basic Data Construction
+             # Note: We skip deep 'info' calls (ROE/Growth) to guarantee sub-5s response.
+             final_list.append({
+                "ticker": cand['ticker'],
+                "price": round(cand['price'], 2),
+                "score": round(cand['tech_score'], 2), # Using RSI/Tech score
+                "rsi": round(cand['rsi'], 2),
+                "vol_shock": round(cand['vol_shock'], 2),
+                "sector": "Momentum", # Placeholder
+                "beta": 1.0
+             })
 
-                final_list.append({
-                    "ticker": ticker,
-                    "price": round(cand['price'], 2),
-                    "score": score,
-                    "rsi": round(cand['rsi'], 2),
-                    "vol_shock": round(cand['vol_shock'], 2),
-                    "sector": sector,
-                    "beta": beta
-                })
-            except Exception as e:
-                print(f"Error processing {ticker}: {e}")
-                continue
-
-        # 5. Final Sort
-        final_list.sort(key=lambda x: x['score'], reverse=True)
         return final_list
 
 scanner = MarketScanner()
