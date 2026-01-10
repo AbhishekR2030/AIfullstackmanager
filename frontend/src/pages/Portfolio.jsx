@@ -195,6 +195,7 @@ const Portfolio = () => {
                                     <th>Stock Name</th>
                                     <th>Avg. Price</th>
                                     <th>Qty</th>
+                                    <th>Invested Value</th>
                                     <th>Current Price</th>
                                     <th>Current Value</th>
                                     <th>P&L (Growth %)</th>
@@ -208,6 +209,7 @@ const Portfolio = () => {
                                         <td className="text-muted text-sm">{trade.company_name || '-'}</td>
                                         <td>₹{trade.buy_price}</td>
                                         <td>{trade.quantity}</td>
+                                        <td>₹{(trade.buy_price * trade.quantity).toFixed(2)}</td>
                                         <td>₹{trade.current_price}</td>
                                         <td>₹{trade.total_value}</td>
                                         <td className={trade.pl_percent >= 0 ? 'text-success' : 'text-danger'} style={{ fontWeight: 'bold' }}>

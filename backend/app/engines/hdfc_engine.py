@@ -182,7 +182,10 @@ class HDFCEngine:
                 "INE144Z01023": "TARSONS.NS",
                 "INE670A01012": "TATAELXSI.NS",
                 "INE251B01027": "ZENTEC.NS",
-                "INF204K01489": "LIQUIDBEES.NS"
+                "INE144Z01023": "TARSONS.NS",
+                "INE670A01012": "TATAELXSI.NS",
+                "INE251B01027": "ZENTEC.NS"
+                # Removed LIQUIDBEES as user requested to filter it out ("Fund")
             }
 
             for item in portfolio_list:
@@ -200,20 +203,24 @@ class HDFCEngine:
                     "Unknown Asset"
                 )
 
-                # --- MUTUAL FUND FILTERING ---
-                # Heuristic: If name contains "Fund", "Plan", "Option" AND it's not a known ETF like BeES
-                # We want to skip MFs as requested.
+                # --- MUTUAL FUND / LIQUID FUND FILTERING ---
+                # Heuristic: If name contains "Fund", "Plan", "Option", "Liquid" AND it's not a known ETF like BeES
                 is_mf = False
                 name_lower = sec_name.lower()
-                if "fund" in name_lower or "plan" in name_lower or "option" in name_lower:
-                    # Exception: ETF names might have 'Fund' sometimes, but usually clearly "ETF"
-                    # If it maps to a known ticker in our list, we KEEP it.
-                    # If it doesn't map and looks like a fund, we DROP it.
-                    if isin not in ISIN_MAP and "etf" not in name_lower and "bees" not in name_lower:
-                        is_mf = True
-
+                
+                keywords = ["fund", "plan", "option", "liquid"]
+                if any(x in name_lower for x in keywords):
+                    # Exception: ETF names might have 'Fund' sometimes (e.g. Gold ETF Fund)
+                    # We keep it ONLY if it's in our approved ISIN_MAP or has 'bees' or strictly 'etf' (though some MFs use ETF in name too)
+                    # User specifically wants Silver/Gold Bees. 
+                    if isin in ISIN_MAP: 
+                         is_mf = False # It's in our safe list
+                    elif "bees" in name_lower:
+                         is_mf = False # Safe (Gold/Silver Bees)
+                    else:
+                         is_mf = True # Filter out generic funds/liquid funds
+                
                 if is_mf:
-                    # User requested to ignore Mutual Funds
                     continue
 
                 # 3. Determine Ticker
