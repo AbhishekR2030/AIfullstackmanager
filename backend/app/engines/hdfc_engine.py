@@ -248,6 +248,7 @@ class HDFCEngine:
                 else:
                     aggregated_holdings[ticker] = {
                         "ticker": ticker,
+                        "company_name": sec_name, # Added field
                         "quantity": qty,
                         "buy_price": price,
                         "buy_date": buy_date,

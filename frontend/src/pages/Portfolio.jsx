@@ -192,11 +192,12 @@ const Portfolio = () => {
                             <thead>
                                 <tr>
                                     <th>Asset</th>
+                                    <th>Stock Name</th>
                                     <th>Avg. Price</th>
                                     <th>Qty</th>
                                     <th>Current Price</th>
                                     <th>Current Value</th>
-                                    <th>P&L</th>
+                                    <th>P&L (Growth %)</th>
                                     <th>Actions</th>
                                 </tr>
                             </thead>
@@ -204,11 +205,12 @@ const Portfolio = () => {
                                 {portfolio.map((trade, index) => (
                                     <tr key={index}>
                                         <td className="fw-bold">{trade.ticker}</td>
+                                        <td className="text-muted text-sm">{trade.company_name || '-'}</td>
                                         <td>₹{trade.buy_price}</td>
                                         <td>{trade.quantity}</td>
                                         <td>₹{trade.current_price}</td>
                                         <td>₹{trade.total_value}</td>
-                                        <td className={trade.pl_percent >= 0 ? 'text-success' : 'text-danger'}>
+                                        <td className={trade.pl_percent >= 0 ? 'text-success' : 'text-danger'} style={{ fontWeight: 'bold' }}>
                                             {trade.pl_percent >= 0 ? '+' : ''}{trade.pl_percent}%
                                         </td>
                                         <td>
