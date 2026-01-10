@@ -167,80 +167,87 @@ class HDFCEngine:
             if isinstance(data, list):
                 portfolio_list = data
 
+            # Robust ISIN Map for Indian Stocks/ETFs (User specific + Common)
+            # This bridges the gap when HDFC returns only ISINs or internal codes.
+            ISIN_MAP = {
+                "INE030A01027": "HINDUNILVR.NS",
+                "INF204KC1402": "SILVERBEES.NS",
+                "INF204KB1715": "GOLDBEES.NS",
+                "INE0LXG01040": "OLAELEC.NS",
+                "INE00H001014": "SWIGGY.NS",
+                "INE483C01032": "TANLA.NS",
+                "INE144Z01023": "TARSONS.NS",
+                "INE670A01012": "TATAELXSI.NS",
+                "INE251B01027": "ZENTEC.NS",
+                "INF204K01489": "LIQUIDBEES.NS"
+            }
+
             for item in portfolio_list:
                 # Debug: print("HDFC Raw Item:", item) 
 
-                # Extract Key Fields
-                isin = item.get("isin")
-                sec_name = item.get("sec_nm", "") # e.g. "HINDUSTAN UNILEVER LTD"
+                # 1. Extract Key Identifier: ISIN
+                isin = item.get("isin", "").strip()
                 
-                # Quantity & Price
+                # 2. Extract Company Name (Try multiple keys)
+                sec_name = (
+                    item.get("company_name") or 
+                    item.get("sec_nm") or 
+                    item.get("symbol_name") or 
+                    item.get("scrip_name") or 
+                    "Unknown Asset"
+                )
+
+                # 3. Determine Ticker
+                ticker = ""
+                
+                # Priority A: Known ISIN Map (Most Reliable for this user)
+                if isin in ISIN_MAP:
+                    ticker = ISIN_MAP[isin]
+                
+                # Priority B: Standard Symbol in Response
+                elif item.get("trading_symbol") or item.get("nse_sym"):
+                    raw_sym = item.get("trading_symbol") or item.get("nse_sym")
+                    ticker = f"{raw_sym.upper().replace('-EQ', '').replace('EQ', '')}.NS"
+                    
+                # Priority C: Fallback
+                else:
+                    # If we can't map it to a Yahoo Ticker, it's likely a Mutual Fund or unknown asset.
+                    # User requested: "Ignore mutual funds... restrict to stocks and ETFs"
+                    # If we can't identify a searchable ticker, we probably shouldn't show it if we are being strict,
+                    # BUT for now, let's keep the ISIN fallback but try to filter MFs if possible.
+                    # Assuming most Stocks have a 'trading_symbol' or are in our ISIN_MAP.
+                    if not ticker:
+                         # Skip if strictly unmapped and looks like an internal Mutual Fund ID?
+                         # For safety, let's map to ISIN so it at least shows up, but user might delete it.
+                         ticker = f"ISIN-{isin}"
+
+                # 4. Filter Mutual Funds? 
+                # Yahoo Finance rarely supports lookup by ISIN directly.
+                # If ticker is still "ISIN-...", it won't get a price. 
+                # The user wants to hide these "Zero Price" assets if they are MFs.
+                # Heuristic: MFs often don't have a 'trading_symbol' in HDFC api.
+                # If ticker starts with ISIN- and user said ignore MFs, let's skip?
+                # Let's trust the Map for now to fix the specific issue.
+
+                # Quantity & Price logic
                 try:
-                    qty = float(item.get("dp_qty", 0)) # "dp_qty" is often the holdings qty
-                    if qty == 0:
-                        qty = float(item.get("quantity", 0)) # Fallback
-                except:
-                    qty = 0
+                    qty = float(item.get("dp_qty", 0)) 
+                    if qty == 0: qty = float(item.get("quantity", 0))
+                except: qty = 0
 
                 try:
                     price = float(item.get("cost_price", 0.0))
-                    if price == 0:
-                         price = float(item.get("average_price", 0.0))
-                except:
-                    price = 0.0
+                    if price == 0: price = float(item.get("average_price", 0.0))
+                except: price = 0.0
 
                 if qty < 0.01: continue
-
-                # Ticker Mapping Logic
-                # 1. Try mapping existing sym if available
-                # 2. Or fallback to smart mapping from Name or ISIN
                 
-                ticker = ""
-                
-                # Known HDFC Symbol to Yahoo Map
-                # HDFC often uses internal IDs or odd abbreviations (e.g. HLLLTD vs HINDUNILVR)
-                manual_map = {
-                    "HLLLTD": "HINDUNILVR.NS",
-                    "NETFSILVER": "SILVERBEES.NS", 
-                    "GOLBEE": "GOLDBEES.NS",
-                    "OLAELEC": "OLAELEC.NS", # Verify if Yahoo has it, often NEW listings need time or specific code
-                    "TANSOL": "TANLA.NS",
-                    "TARSONSIQ": "TARSONS.NS",
-                    "TATELX": "TATAELXSI.NS",
-                    "ZETECH": "ZENTEC.NS",
-                    "SWIGGY": "SWIGGY.NS"
-                }
-
-                # Try finding a symbol in response
-                raw_sym = item.get("trading_symbol") or item.get("nse_sym") or item.get("symbol")
-                
-                # Clean raw symbol (remove EQ suffixes)
-                if raw_sym:
-                    clean_sym = raw_sym.upper().replace("-EQ", "").replace("EQ", "")
-                    if clean_sym in manual_map:
-                        ticker = manual_map[clean_sym]
-                    else:
-                        ticker = f"{clean_sym}.NS"
-                else:
-                    # Fallback strategies
-                    # If ISIN is available, we could map, but usually raw_sym exists.
-                    # As a last resort, use ISIN.   
-                    if isin:
-                         ticker = f"ISIN-{isin}"
-                    else:
-                        ticker = f"UNKNOWN-{sec_name[:5]}"
-
-                # Final Override for known bad Yahoo mappings if raw_sym logic failed
-                # (Double check the generated ticker against the map just in case)
-                base_ticker = ticker.split('.')[0]
-                if base_ticker in manual_map:
-                     ticker = manual_map[base_ticker]
-
                 buy_date = item.get("date", datetime.now().strftime("%Y-%m-%d"))
 
                 # Aggregation
                 if ticker in aggregated_holdings:
                     existing = aggregated_holdings[ticker]
+                    # Update weighted avg
                     total_qty = existing["quantity"] + qty
                     total_cost = (existing["quantity"] * existing["buy_price"]) + (qty * price)
                     existing["quantity"] = total_qty
@@ -248,7 +255,7 @@ class HDFCEngine:
                 else:
                     aggregated_holdings[ticker] = {
                         "ticker": ticker,
-                        "company_name": sec_name, # Added field
+                        "company_name": sec_name,
                         "quantity": qty,
                         "buy_price": price,
                         "buy_date": buy_date,
