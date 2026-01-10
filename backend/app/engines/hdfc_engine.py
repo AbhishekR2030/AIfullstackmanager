@@ -169,10 +169,13 @@ class HDFCEngine:
 
             # Robust ISIN Map for Indian Stocks/ETFs (User specific + Common)
             # This bridges the gap when HDFC returns only ISINs or internal codes.
+            # Robust ISIN Map for Indian Stocks/ETFs (User specific + Common)
+            # This bridges the gap when HDFC returns only ISINs or internal codes.
             ISIN_MAP = {
                 "INE030A01027": "HINDUNILVR.NS",
                 "INF204KC1402": "SILVERBEES.NS",
                 "INF204KB1715": "GOLDBEES.NS",
+                "INF204KB17I5": "GOLDBEES.NS", # Handling potential typo/OCR issue from source
                 "INE0LXG01040": "OLAELEC.NS",
                 "INE00H001014": "SWIGGY.NS",
                 "INE483C01032": "TANLA.NS",
@@ -197,6 +200,22 @@ class HDFCEngine:
                     "Unknown Asset"
                 )
 
+                # --- MUTUAL FUND FILTERING ---
+                # Heuristic: If name contains "Fund", "Plan", "Option" AND it's not a known ETF like BeES
+                # We want to skip MFs as requested.
+                is_mf = False
+                name_lower = sec_name.lower()
+                if "fund" in name_lower or "plan" in name_lower or "option" in name_lower:
+                    # Exception: ETF names might have 'Fund' sometimes, but usually clearly "ETF"
+                    # If it maps to a known ticker in our list, we KEEP it.
+                    # If it doesn't map and looks like a fund, we DROP it.
+                    if isin not in ISIN_MAP and "etf" not in name_lower and "bees" not in name_lower:
+                        is_mf = True
+
+                if is_mf:
+                    # User requested to ignore Mutual Funds
+                    continue
+
                 # 3. Determine Ticker
                 ticker = ""
                 
@@ -211,11 +230,6 @@ class HDFCEngine:
                     
                 # Priority C: Fallback
                 else:
-                    # If we can't map it to a Yahoo Ticker, it's likely a Mutual Fund or unknown asset.
-                    # User requested: "Ignore mutual funds... restrict to stocks and ETFs"
-                    # If we can't identify a searchable ticker, we probably shouldn't show it if we are being strict,
-                    # BUT for now, let's keep the ISIN fallback but try to filter MFs if possible.
-                    # Assuming most Stocks have a 'trading_symbol' or are in our ISIN_MAP.
                     if not ticker:
                          # Skip if strictly unmapped and looks like an internal Mutual Fund ID?
                          # For safety, let's map to ISIN so it at least shows up, but user might delete it.
