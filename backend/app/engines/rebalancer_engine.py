@@ -91,17 +91,30 @@ class RebalancerEngine:
             reason = ""
             score = 0
             
+            # default values
+            trend = "Unknown"
+            
             try:
                 # Need Info for Scoring (Expensive but necessary for 'Step D')
                 # In prod, cache this or pass it in.
                 t_obj = yf.Ticker(ticker)
                 info = t_obj.info
                 
-                df = data[ticker].dropna() if len(tickers) > 1 else data
+                # Check if data exists for this ticker
+                if len(tickers) > 1:
+                    if ticker not in data.columns.levels[0]:
+                        raise ValueError(f"No data for {ticker}")
+                    df = data[ticker].dropna()
+                else:
+                    df = data.dropna()
+
                 if df is not None and not df.empty and len(df) > 50:
                     current_price = df['Close'].iloc[-1]
                     sma_20 = df['Close'].rolling(20).mean().iloc[-1]
                     
+                    # Determine Trend
+                    trend = "Bullish" if current_price > sma_20 else "Bearish"
+
                     # Calculate Stats
                     score = self._calculate_upside_score(df, info)
                     pl_pct = asset.get('pl_percent', 0)
@@ -124,28 +137,19 @@ class RebalancerEngine:
                             is_sell_candidate = True
                             sell_reasons.append("Price < 20 SMA")
                             
-                        # 3. Relative Strength (RS)
-                        # Checking purely against S&P/Nifty is ideal, but here comparing internal scores?
-                        # Prompt says "Lowest Relative Strength in Portfolio".
-                        # We can flag it, but we need to know OTHERS' RS to know if it's lowest.
-                        # For now, just using Score as proxy for strength. 
-                        # If Score < 40 maybe? 
-                        
                         if is_sell_candidate:
                             recommendation = "SELL_CANDIDATE"
                             reason = ", ".join(sell_reasons)
                             
                         # --- Step D: Swap Decision ---
-                        # If it is a Sell Candidate OR just weak, compare with New.
-                        # Prompt says evaluate Swap for "Unlocked" assets.
                         # Rule: IF New > Old * 1.2
-                        
                         if best_new_score > (score * 1.20):
                             recommendation = "SWAP_ADVICE"
                             reason = f"Upgrade: New Score {best_new_score} >> Old {score}"
 
             except Exception as e:
-                reason = f"Data Error"
+                # print(f"Analysis Error for {ticker}: {e}")
+                reason = f"Data Error: {str(e)}"
                 
             analyzed_assets.append({
                 "ticker": ticker,
@@ -154,6 +158,7 @@ class RebalancerEngine:
                 "recommendation": recommendation,
                 "reason": reason,
                 "score": round(score, 1),
+                "trend": trend,
                 "pl_percent": asset.get('pl_percent', 0)
             })
             
