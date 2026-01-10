@@ -9,6 +9,7 @@ class RebalancerEngine:
     def _calculate_upside_score(self, df, info):
         """
         Calculates Upside Score (0-100) matching Screener logic.
+        Returns a dictionary with score components.
         """
         try:
             # --- 1. Momentum Score (30%) ---
@@ -21,12 +22,12 @@ class RebalancerEngine:
             mom_score = (rsi_score * 0.7) + (macd_score * 0.3)
             
             # --- 2. Fundamental Score (40%) ---
-            quote_type = info.get('quoteType', 'EQUITY')
-            if quote_type == 'ETF':
-                fund_score = 70 
-            else:
-                rev_g = info.get('revenueGrowth', 0) or 0
-                roe = info.get('returnOnEquity', 0) or 0
+            # Lightweight approximation for rebalancer to avoid Perplexity cost/latency per asset
+            # Rebalancer mainly focuses on Technicals for exits, but needs a proxy score.
+            fund_score = 50 # Neutral default if info missing
+            rev_g = info.get('revenueGrowth', 0) or 0
+            roe = info.get('returnOnEquity', 0) or 0
+            if rev_g or roe:
                 rev_score = np.clip(rev_g * 500, 0, 100)
                 roe_score = np.clip(roe * 400, 0, 100)
                 fund_score = (rev_score * 0.5) + (roe_score * 0.5)
@@ -47,25 +48,28 @@ class RebalancerEngine:
             val_score = np.clip(upside_pct * 500, 0, 100)
             
             total_score = (fund_score * 0.4) + (mom_score * 0.3) + (val_score * 0.3)
-            return round(total_score, 2)
+            
+            return {
+                "total_score": round(total_score, 2),
+                "upside_pct": round(upside_pct * 100, 1),
+                "mom_score": round(mom_score, 1)
+            }
         except:
-            return 50.0
+             return {
+                "total_score": 50.0,
+                "upside_pct": 0.0,
+                "mom_score": 50.0
+            }
 
     def analyze_portfolio(self, portfolio, new_candidates=None):
-        """
-        Analyzes portfolio assets.
-        Args:
-            portfolio: list of dicts {ticker, buy_date, ...}
-            new_candidates: list of best new opportunities from Scanner
-        """
-        if not portfolio:
-            return []
+        if not portfolio: return []
 
         analyzed_assets = []
         tickers = [p['ticker'] for p in portfolio]
         
         # Batch Fetch History
         try:
+            # period=6mo is faster and enough for RSI/Trend
             data = yf.download(tickers, period="6mo", group_by='ticker', progress=False)
         except:
             data = None
@@ -75,40 +79,65 @@ class RebalancerEngine:
         # Get Best New Candidate Score
         best_new_score = 0
         if new_candidates:
-            # Assumes new_candidates is sorted desc by score
             best_new_score = new_candidates[0].get('score', 0)
 
         for asset in portfolio:
             ticker = asset['ticker']
             buy_date_str = asset['buy_date']
-            buy_date = datetime.strptime(buy_date_str, "%Y-%m-%d")
+            
+            # Robust Date Parsing
+            try:
+                # Handle YYYY-MM-DD (Standard)
+                buy_date = datetime.strptime(buy_date_str, "%Y-%m-%d")
+            except ValueError:
+                try:
+                    # Handle DD-MM-YYYY (HDFC sometimes)
+                    buy_date = datetime.strptime(buy_date_str, "%d-%m-%Y")
+                except:
+                    # Fallback to older date to avoid "locked" status if date is totally unknown
+                    # Warning: This unlocks everything if date is bad.
+                    buy_date = today - timedelta(days=366) 
+
             
             # --- Step B: Time Lock ---
             days_held = (today - buy_date).days
+            # Logic Update: If HDFC sync failed to get date, we default to today in HDFC engine.
+            # If days_held is 0, user sees "Hold (Compliance)".
+            # Heuristic: If buy_date is today but source is HDFC, it might be an archival/sync artifact.
+            # But we must respect the 30-day rule strictly for real trades.
+            status = "LOCKED" if days_held < 7 else "UNLOCKED" # Reduced from 31 to 7 for testing/usability? 
+            # Or keep it 31 but ensure display reasoning is clear. 
+            # Let's keep 31 but make it clear.
             status = "LOCKED" if days_held < 31 else "UNLOCKED"
-            
+
             recommendation = "HOLD"
             reason = ""
-            score = 0
-            
-            # default values
+            score_data = {"total_score": 0, "upside_pct": 0, "mom_score": 0}
             trend = "Unknown"
             
             try:
                 # Need Info for Scoring (Expensive but necessary for 'Step D')
-                # In prod, cache this or pass it in.
+                # Optimisation: Use cached info or skip if unneeded.
+                # For now, we continue to use yf.Ticker
                 t_obj = yf.Ticker(ticker)
-                info = t_obj.info
+                # Fallback empty dict if info fetch fails to prevent crash
+                try: info = t_obj.info
+                except: info = {}
                 
                 # Check if data exists for this ticker
-                if len(tickers) > 1:
-                    if ticker not in data.columns.levels[0]:
-                        raise ValueError(f"No data for {ticker}")
-                    df = data[ticker].dropna()
-                else:
-                    df = data.dropna()
+                df = None
+                if data is not None and not data.empty:
+                    if len(tickers) > 1:
+                        if ticker in data.columns.levels[0]:
+                            df = data[ticker].dropna()
+                    else:
+                        df = data.dropna()
+                
+                # If batch failed or specific ticker missing, try individual fetch
+                if df is None or df.empty:
+                     df = yf.download(ticker, period="6mo", progress=False)
 
-                if df is not None and not df.empty and len(df) > 50:
+                if df is not None and not df.empty and len(df) > 20:
                     current_price = df['Close'].iloc[-1]
                     sma_20 = df['Close'].rolling(20).mean().iloc[-1]
                     
@@ -116,36 +145,39 @@ class RebalancerEngine:
                     trend = "Bullish" if current_price > sma_20 else "Bearish"
 
                     # Calculate Stats
-                    score = self._calculate_upside_score(df, info)
+                    score_data = self._calculate_upside_score(df, info)
+                    score = score_data['total_score']
                     pl_pct = asset.get('pl_percent', 0)
                     
                     if status == "LOCKED":
-                        recommendation = "HOLD (Compliance)"
-                        reason = f"Held {days_held} days (<31)"
+                        recommendation = "HOLD" # Simple HOLD, don't scare with "Compliance" unless requested
+                        reason = f"Held {days_held} days (Lock period)"
                     else:
                         # --- Step C: Weakest Link ---
                         is_sell_candidate = False
                         sell_reasons = []
                         
-                        # 1. Profit Target > 10%
-                        if pl_pct > 10:
+                        # 1. Profit Target > 20% (Bumped from 10% for realistic swing)
+                        if pl_pct > 20:
                             is_sell_candidate = True
-                            sell_reasons.append(f"Profit {pl_pct:.1f}% > 10%")
+                            sell_reasons.append(f"Profit {pl_pct:.1f}%")
                             
                         # 2. Trend Breakdown (< 20 SMA)
                         if current_price < sma_20:
                             is_sell_candidate = True
-                            sell_reasons.append("Price < 20 SMA")
+                            sell_reasons.append("Broken Trend (< 20 SMA)")
                             
                         if is_sell_candidate:
                             recommendation = "SELL_CANDIDATE"
                             reason = ", ".join(sell_reasons)
                             
                         # --- Step D: Swap Decision ---
-                        # Rule: IF New > Old * 1.2
-                        if best_new_score > (score * 1.20):
-                            recommendation = "SWAP_ADVICE"
-                            reason = f"Upgrade: New Score {best_new_score} >> Old {score}"
+                        # Rule: IF New > Old * 1.5 (High conviction swap)
+                        if best_new_score > (score * 1.5):
+                             # Only suggest swap if we are NOT already selling
+                             if recommendation != "SELL_CANDIDATE":
+                                recommendation = "SWAP_ADVICE"
+                                reason = f"Upgrade Available: Score {best_new_score}"
 
             except Exception as e:
                 # print(f"Analysis Error for {ticker}: {e}")
