@@ -10,7 +10,8 @@ DB_FILE = "portfolio_db.json"
 class PortfolioEngine:
     def __init__(self):
         self.db_file = DB_FILE
-        self.portfolio_db = {} # Changed from list to dict {email: [trades]}
+        self.portfolio_db = {} 
+        # DB Reloaded on Init - Stale Cache Cleared 
         self._load_db()
 
     def _load_db(self):
@@ -172,11 +173,26 @@ class PortfolioEngine:
 
         tickers = list(set([t['ticker'] for t in user_trades]))
         
-        try:
-            earliest_date = min([datetime.strptime(t['buy_date'], "%Y-%m-%d") for t in user_trades])
-        except:
+        parsed_dates = []
+        for t in user_trades:
+            d_str = t.get('buy_date')
+            if not d_str: continue
+            
+            p_date = None
+            for fmt in ["%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d"]:
+                try:
+                    p_date = datetime.strptime(d_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            
+            if p_date:
+                parsed_dates.append(p_date)
+        
+        if not parsed_dates:
              return {"dates": [], "portfolio_value": [], "invested_value": []}
-             
+
+        earliest_date = min(parsed_dates)
         start_date = earliest_date.strftime("%Y-%m-%d")
         
         try:
@@ -205,7 +221,15 @@ class PortfolioEngine:
             ticker = trade['ticker']
             qty = float(trade['quantity'])
             buy_price = float(trade['buy_price'])
-            buy_date_ts = pd.Timestamp(trade['buy_date'])
+            # Robust Date Parsing for Trace
+            d_str = trade.get('buy_date', '')
+            buy_date_ts = pd.Timestamp.now() # Fallback
+            for fmt in ["%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d"]:
+                try:
+                    buy_date_ts = pd.Timestamp(datetime.strptime(d_str, fmt))
+                    break
+                except ValueError:
+                    continue
             
             invested_series.loc[buy_date_ts:] += (buy_price * qty)
             
