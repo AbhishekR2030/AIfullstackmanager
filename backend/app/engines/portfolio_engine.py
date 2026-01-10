@@ -55,27 +55,18 @@ class PortfolioEngine:
 
     def sync_hdfc_trades(self, hdfc_trades, user_email):
         """
-        Replaces all existing HDFC trades with the fresh batch.
-        Preserves MANUAL trades.
+        Replaces ALL existing trades with the fresh batch from HDFC.
+        This effectively clears stale or manual trades that are no longer owned,
+        making HDFC the single source of truth as requested by the user.
         """
-        if user_email not in self.portfolio_db:
-            self.portfolio_db[user_email] = []
-
-        # 1. Separate existing manual trades
-        current_portfolio = self.portfolio_db[user_email]
-        manual_trades = [t for t in current_portfolio if t.get("source") != "HDFC"]
-        
-        # 2. Merge with new HDFC trades
-        # hdfc_trades is expected to be a list of trade dicts
-        updated_portfolio = manual_trades + hdfc_trades
-        
-        self.portfolio_db[user_email] = updated_portfolio
+        # Overwrite user portfolio directly
+        self.portfolio_db[user_email] = hdfc_trades
         self._save_db()
         
         return {
-            "message": "Portfolio synced with HDFC", 
+            "message": "Portfolio fully synced with HDFC (Overwritten)", 
             "added_count": len(hdfc_trades),
-            "total_count": len(updated_portfolio)
+            "total_count": len(hdfc_trades)
         }
 
 
