@@ -23,3 +23,5 @@ app.include_router(api_router, prefix="/api/v1")
 @app.get("/")
 def read_root():
     return {"message": "AlphaSeeker India Backend is running"}
+
+# Force Reload System Check - Clear Cache
