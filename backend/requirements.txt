@@ -15,4 +15,4 @@ python-multipart
 python-jose[cryptography]
 passlib[bcrypt]
 ta
-pandas_ta
+pandas-ta
