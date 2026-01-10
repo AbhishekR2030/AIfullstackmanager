@@ -250,16 +250,27 @@ class MarketScanner:
             # Fetch Data
             p_data = self._fetch_perplexity_fundamentals(ticker, region)
             
+            # Helper to safely float conversion
+            def safe_float(val, default=0.0):
+                try:
+                    if val is None: return default
+                    return float(val)
+                except:
+                    return default
+
             # Construct Info Object for Scoring
-            # We map Perplexity keys to what our scoring engine expects
+            rev_growth = safe_float(p_data.get('revenue_growth_yoy'))
+            roe = safe_float(p_data.get('return_on_equity'))
+            dte = safe_float(p_data.get('debt_to_equity')) * 100 # Adjust logic if needed based on source
+            
             info_proxy = {
-                'quoteType': 'EQUITY', # Assumption
-                'revenueGrowth': p_data.get('revenue_growth_yoy', 0),
-                'returnOnEquity': p_data.get('return_on_equity', 0),
-                'debtToEquity': (p_data.get('debt_to_equity', 0) or 0) * 100, # Yahoo uses %
+                'quoteType': 'EQUITY', 
+                'revenueGrowth': rev_growth,
+                'returnOnEquity': roe,
+                'debtToEquity': dte,
                 'sector': p_data.get('sector', 'Unknown'),
-                'beta': p_data.get('beta', 1.0),
-                'targetMeanPrice': cand['price'] * 1.2 # specific target unavailable via quick api usually
+                'beta': safe_float(p_data.get('beta'), 1.0),
+                'targetMeanPrice': cand['price'] * 1.2 
             }
             
             # Fundamental Check Logic
@@ -268,16 +279,11 @@ class MarketScanner:
             
             # Equity Logic ( Simplified Version of _check_fundamentals )
             if info_proxy['revenueGrowth'] < 0.15:
-                passed = False; reason = f"Low Growth: {info_proxy['revenueGrowth']}"
+                passed = False; reason = f"Low Growth: {info_proxy['revenueGrowth']:.2f}"
             elif info_proxy['returnOnEquity'] < 0.18:
-                passed = False; reason = f"Low ROE: {info_proxy['returnOnEquity']}"
-            elif info_proxy['debtToEquity'] > 40: # 0.4 ratio = 40
-                passed = False; reason = f"High Debt: {info_proxy['debtToEquity']}"
-            
-            # Allow purely momentum plays if score is super high? 
-            # User said "incorporate logic". We must flag it.
-            # But to ensure we don't return empty list for now, we include but penalize score?
-            # Or strict filtering? "Fundamental Safety Check" implies strict.
+                passed = False; reason = f"Low ROE: {info_proxy['returnOnEquity']:.2f}"
+            elif info_proxy['debtToEquity'] > 40: 
+                passed = False; reason = f"High Debt: {info_proxy['debtToEquity']:.2f}"
             
             if not passed:
                 print(f"Fundamental Reject {ticker}: {reason}")
