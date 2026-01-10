@@ -168,68 +168,98 @@ class HDFCEngine:
                 portfolio_list = data
 
             for item in portfolio_list:
-                # Extract fields
-                # IMPROVED MAPPING: Prioritize standard symbols over internal security_id
-                
-                # Check for standard exchange symbols first
-                raw_ticker = item.get("trading_symbol") or item.get("symbol") or item.get("nse_symbol")
-                
-                # Fallback to security_id (often legacy namings like MUNDRAPORT)
-                if not raw_ticker:
-                     raw_ticker = item.get("security_id", "")
+                # Debug: print("HDFC Raw Item:", item) 
 
-                company = item.get("company_name", "")
+                # Extract Key Fields
+                isin = item.get("isin")
+                sec_name = item.get("sec_nm", "") # e.g. "HINDUSTAN UNILEVER LTD"
                 
-                ticker = raw_ticker
-                if ticker:
-                    ticker = ticker.upper()
-                    # Remove common suffixes from HDFC
-                    for suffix in ["-EQ", "EQ", "BE", "-BE", "BZ", "-BZ"]:
-                        if ticker.endswith(suffix):
-                             ticker = ticker[:-len(suffix)]
-                             break
-                    
-                    # Yahoo Finance usually needs .NS for NSE
-                    if not ticker.endswith(".NS") and not ticker.endswith(".BO"):
-                         ticker = f"{ticker}.NS"
-                else:
-                     ticker = f"ISIN-{item.get('isin', 'UNKNOWN')}"
-
-                # Ensure Quantity is valid
+                # Quantity & Price
                 try:
-                    qty = float(item.get("quantity", 0))
+                    qty = float(item.get("dp_qty", 0)) # "dp_qty" is often the holdings qty
+                    if qty == 0:
+                        qty = float(item.get("quantity", 0)) # Fallback
                 except:
                     qty = 0
 
-                price = float(item.get("average_price", 0.0))
+                try:
+                    price = float(item.get("cost_price", 0.0))
+                    if price == 0:
+                         price = float(item.get("average_price", 0.0))
+                except:
+                    price = 0.0
+
+                if qty < 0.01: continue
+
+                # Ticker Mapping Logic
+                # 1. Try mapping existing sym if available
+                # 2. Or fallback to smart mapping from Name or ISIN
+                
+                ticker = ""
+                
+                # Known HDFC Symbol to Yahoo Map
+                # HDFC often uses internal IDs or odd abbreviations (e.g. HLLLTD vs HINDUNILVR)
+                manual_map = {
+                    "HLLLTD": "HINDUNILVR.NS",
+                    "NETFSILVER": "SILVERBEES.NS", 
+                    "GOLBEE": "GOLDBEES.NS",
+                    "OLAELEC": "OLAELEC.NS", # Verify if Yahoo has it, often NEW listings need time or specific code
+                    "TANSOL": "TANLA.NS",
+                    "TARSONSIQ": "TARSONS.NS",
+                    "TATELX": "TATAELXSI.NS",
+                    "ZETECH": "ZENTEC.NS",
+                    "SWIGGY": "SWIGGY.NS"
+                }
+
+                # Try finding a symbol in response
+                raw_sym = item.get("trading_symbol") or item.get("nse_sym") or item.get("symbol")
+                
+                # Clean raw symbol (remove EQ suffixes)
+                if raw_sym:
+                    clean_sym = raw_sym.upper().replace("-EQ", "").replace("EQ", "")
+                    if clean_sym in manual_map:
+                        ticker = manual_map[clean_sym]
+                    else:
+                        ticker = f"{clean_sym}.NS"
+                else:
+                    # Fallback strategies
+                    # If ISIN is available, we could map, but usually raw_sym exists.
+                    # As a last resort, use ISIN.   
+                    if isin:
+                         ticker = f"ISIN-{isin}"
+                    else:
+                        ticker = f"UNKNOWN-{sec_name[:5]}"
+
+                # Final Override for known bad Yahoo mappings if raw_sym logic failed
+                # (Double check the generated ticker against the map just in case)
+                base_ticker = ticker.split('.')[0]
+                if base_ticker in manual_map:
+                     ticker = manual_map[base_ticker]
+
                 buy_date = item.get("date", datetime.now().strftime("%Y-%m-%d"))
 
-                # Filter out zero quantity (sold positions)
-                if qty > 0.01:
-                    # Aggregation Key: Use Ticker
-                    if ticker in aggregated_holdings:
-                        # Update weighted average price and total quantity
-                        existing = aggregated_holdings[ticker]
-                        total_qty = existing["quantity"] + qty
-                        total_cost = (existing["quantity"] * existing["buy_price"]) + (qty * price)
-                        existing["quantity"] = total_qty
-                        existing["buy_price"] = total_cost / total_qty
-                        # Keep earliest buy_date or latest? HDFC doesn't give lot dates well here.
-                    else:
-                        aggregated_holdings[ticker] = {
-                            "ticker": ticker,
-                            "quantity": qty,
-                            "buy_price": price,
-                            "buy_date": buy_date,
-                            "source": "HDFC"
-                        }
+                # Aggregation
+                if ticker in aggregated_holdings:
+                    existing = aggregated_holdings[ticker]
+                    total_qty = existing["quantity"] + qty
+                    total_cost = (existing["quantity"] * existing["buy_price"]) + (qty * price)
+                    existing["quantity"] = total_qty
+                    existing["buy_price"] = total_cost / total_qty
+                else:
+                    aggregated_holdings[ticker] = {
+                        "ticker": ticker,
+                        "quantity": qty,
+                        "buy_price": price,
+                        "buy_date": buy_date,
+                        "source": "HDFC"
+                    }
             
             # Convert aggregated dict back to list
-            # Round quantity to integer if it's close (Indian stocks usually int)
             final_holdings = []
             for t, data in aggregated_holdings.items():
                 data["quantity"] = int(data["quantity"])
-                final_holdings.append(data)
+                if data["quantity"] > 0: # Double check
+                    final_holdings.append(data)
                 
             return final_holdings
 
