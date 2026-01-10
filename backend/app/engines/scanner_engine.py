@@ -182,48 +182,55 @@ class MarketScanner:
                 })
              except: continue
 
-        print(f"Passed Tech Screen: {len(tech_pass_candidates)}")
-        
-        # 3. Sort & Slice (Limit to Top 10)
+        # 3. Sort & Slice (Limit to Top 5 STRICT for reliability)
         tech_pass_candidates.sort(key=lambda x: x['vol_shock'], reverse=True)
-        top_candidates = tech_pass_candidates[:10]
+        top_candidates = tech_pass_candidates[:5]
         
         if not top_candidates: return []
         
-        # 4. Fetch Fundamentals (Threaded)
-        print("Fetching fundamentals threaded...")
+        # 4. Fetch Fundamentals (Sequential & Safe)
+        print("Fetching fundamentals (Sequential Safe Mode)...")
         final_list = []
         
-        def process_candidate(cand):
+        for cand in top_candidates:
+            ticker = cand['ticker']
             try:
-                ticker = cand['ticker']
+                # Sequential fetch is safer for Yahoo rate limits
                 t_obj = yf.Ticker(ticker)
-                info = t_obj.info
                 
-                passed, reason = self._check_fundamentals(ticker, info, region)
-                if not passed: return None
-                
-                score = self._calculate_upside_score(cand['df'], info, region)
-                
-                return {
+                # Try fetching info with a fallback
+                try:
+                    info = t_obj.info
+                    passed, reason = self._check_fundamentals(ticker, info, region)
+                    if not passed:
+                        print(f"Skipping {ticker}: {reason}")
+                        continue
+                    score = self._calculate_upside_score(cand['df'], info, region)
+                    sector = info.get('sector', 'Unknown')
+                    beta = info.get('beta', 1.0)
+                except Exception:
+                    # Fallback if Yahoo blocks 'info'
+                    print(f"Warning: Fundamental data failed for {ticker}. Using Technical Score.")
+                    info = {}
+                    score = cand['tech_score'] # Use RSI as proxy
+                    sector = "Unknown"
+                    beta = 1.0
+
+                final_list.append({
                     "ticker": ticker,
                     "price": round(cand['price'], 2),
                     "score": score,
                     "rsi": round(cand['rsi'], 2),
                     "vol_shock": round(cand['vol_shock'], 2),
-                    "sector": info.get('sector', 'Unknown'),
-                    "beta": info.get('beta', 1.0)
-                }
-            except:
-                return None
-
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            results = list(executor.map(process_candidate, top_candidates))
-
-        final_list = [r for r in results if r is not None]
+                    "sector": sector,
+                    "beta": beta
+                })
+            except Exception as e:
+                print(f"Error processing {ticker}: {e}")
+                continue
 
         # 5. Final Sort
         final_list.sort(key=lambda x: x['score'], reverse=True)
-        return final_list[:5]
+        return final_list
 
 scanner = MarketScanner()
