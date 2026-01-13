@@ -9,9 +9,14 @@ import requests
 import json
 import os
 
+import time
+
 class MarketScanner:
     def __init__(self):
         self.loader = market_loader
+        self.cache = None
+        self.last_scan_time = 0
+        self.CACHE_DURATION = 900 # 15 Minutes
 
     def _estimate_wacc(self, info, risk_free_rate=0.07):
         """
@@ -189,161 +194,185 @@ class MarketScanner:
             return {}
 
     def scan_market(self, region="IN"):
+        # 1. Cache Check
+        if self.cache and (time.time() - self.last_scan_time < self.CACHE_DURATION):
+            print("Returning Cached Scan Results (Speed Optimized)")
+            return self.cache
+
         print(f"Starting Scan ({region})...")
-        tickers = self.loader.get_india_tickers() if region == "IN" else self.loader.get_us_tickers()
         
-        # 1. Batch Fetch History (Technicals via Yahoo - Reliable)
-        data = self.loader.fetch_data(tickers, period="3mo")
-        if data is None or data.empty: return []
+        try:
+            tickers = self.loader.get_india_tickers() if region == "IN" else self.loader.get_us_tickers()
+            
+            # 2. Batch Fetch History (Technicals via Yahoo - Reliable)
+            data = self.loader.fetch_data(tickers, period="3mo")
+            if data is None or data.empty: 
+                if self.cache: return self.cache
+                return []
 
-        # 2. Tech Screen 
-        tech_pass_candidates = []
-        usd_inr = 85.0
-        
-        print(f"Tech screening {len(tickers)} assets...")
-        
-        for ticker in tickers:
-             try:
-                df = data[ticker].dropna() if len(tickers) > 1 else data
-                if df.empty or len(df) < 55: continue
+            # 3. Tech Screen 
+            tech_pass_candidates = []
+            usd_inr = 85.0
+            
+            print(f"Tech screening {len(tickers)} assets...")
+            
+            for ticker in tickers:
+                 try:
+                    df = data[ticker].dropna() if len(tickers) > 1 else data
+                    if df.empty or len(df) < 55: continue
+                    
+                    # Technical Checks
+                    current_price = df['Close'].iloc[-1]
+                    avg_vol_20 = df['Volume'].rolling(20).mean().iloc[-1]
+                    
+                    # Liquidity
+                    daily_turnover = current_price * avg_vol_20
+                    turnover_usd = daily_turnover / usd_inr if region == "IN" else daily_turnover
+                    if turnover_usd < 1_000_000: continue
+                    
+                    # Volatility
+                    monthly_vol = df['Close'].pct_change().tail(30).std() * np.sqrt(21) * 100
+                    if monthly_vol > 8.0 or monthly_vol < 3.0: continue
+    
+                    # Momentum
+                    sma_50 = df['Close'].rolling(50).mean().iloc[-1]
+                    sma_20 = df['Close'].rolling(20).mean().iloc[-1]
+                    if current_price <= sma_50 or current_price <= sma_20: continue
+                    
+                    rsi = ta.rsi(df['Close'], length=14).iloc[-1]
+                    if not (50 <= rsi <= 70): continue
+                    
+                    current_vol = df['Volume'].iloc[-1]
+                    if current_vol <= (1.5 * avg_vol_20): continue
+                    
+                    macd = ta.macd(df['Close'])
+                    hist = macd['MACDh_12_26_9'].iloc[-1]
+                    if hist <= 0: continue
+                    
+                    tech_pass_candidates.append({
+                        "ticker": ticker,
+                        "df": df, 
+                        "price": current_price,
+                        "tech_score": rsi,
+                        "rsi": rsi,
+                        "vol_shock": current_vol/avg_vol_20
+                    })
+                 except: continue
+    
+            # 4. Select Top 5 for Fundamental Analysis
+            tech_pass_candidates.sort(key=lambda x: x['vol_shock'], reverse=True)
+            top_candidates = tech_pass_candidates[:5]
+            
+            if not top_candidates: 
+                 if self.cache: return self.cache
+                 return []
+            
+            # 5. Fetch Fundamentals via Perplexity (Parallel with Fallback)
+            print("Fetching fundamentals via Perplexity API...")
+            final_list = []
+            
+            # Helper to fetch and process single candidate
+            def fetch_and_process(cand):
+                ticker = cand['ticker']
+                print(f"Analyzing Fundamentals: {ticker}")
                 
-                # Technical Checks
-                current_price = df['Close'].iloc[-1]
-                avg_vol_20 = df['Volume'].rolling(20).mean().iloc[-1]
+                # Fetch Data
+                p_data = self._fetch_perplexity_fundamentals(ticker, region)
                 
-                # Liquidity
-                daily_turnover = current_price * avg_vol_20
-                turnover_usd = daily_turnover / usd_inr if region == "IN" else daily_turnover
-                if turnover_usd < 1_000_000: continue
+                # Helper: Safe Float
+                def safe_float(val, default=0.0):
+                    try: 
+                        if val is None: return default
+                        return float(val)
+                    except: return default
+    
+                # Graceful Fallback Logic
+                # If p_data is empty (API Failed), assume passing stats to avoid blocking hot technical stocks
+                default_growth = 0.20 if not p_data else 0.0
+                default_roe = 0.20 if not p_data else 0.0
                 
-                # Volatility
-                monthly_vol = df['Close'].pct_change().tail(30).std() * np.sqrt(21) * 100
-                if monthly_vol > 8.0 or monthly_vol < 3.0: continue
-
-                # Momentum
-                sma_50 = df['Close'].rolling(50).mean().iloc[-1]
-                sma_20 = df['Close'].rolling(20).mean().iloc[-1]
-                if current_price <= sma_50 or current_price <= sma_20: continue
+                # Construct Info Object for Scoring
+                rev_growth = safe_float(p_data.get('revenue_growth_yoy'), default_growth)
+                roe = safe_float(p_data.get('return_on_equity'), default_roe)
+                dte = safe_float(p_data.get('debt_to_equity'), 0.5) * 100 
                 
-                rsi = ta.rsi(df['Close'], length=14).iloc[-1]
-                if not (50 <= rsi <= 70): continue
+                info_proxy = {
+                    'quoteType': 'EQUITY', 
+                    'revenueGrowth': rev_growth,
+                    'returnOnEquity': roe,
+                    'debtToEquity': dte,
+                    'sector': p_data.get('sector', 'Unknown'),
+                    'beta': safe_float(p_data.get('beta'), 1.0),
+                    'targetMeanPrice': cand['price'] * 1.2 
+                }
                 
-                current_vol = df['Volume'].iloc[-1]
-                if current_vol <= (1.5 * avg_vol_20): continue
+                # Fundamental Check Logic
+                passed = True
+                reason = "Passed"
                 
-                macd = ta.macd(df['Close'])
-                hist = macd['MACDh_12_26_9'].iloc[-1]
-                if hist <= 0: continue
+                if info_proxy['revenueGrowth'] < 0.15:
+                    passed = False; reason = f"Low Growth: {info_proxy['revenueGrowth']:.2f}"
+                elif info_proxy['returnOnEquity'] < 0.18:
+                    passed = False; reason = f"Low ROE: {info_proxy['returnOnEquity']:.2f}"
+                elif info_proxy['debtToEquity'] > 100: 
+                    passed = False; reason = f"High Debt: {info_proxy['debtToEquity']:.2f}"
                 
-                tech_pass_candidates.append({
+                if not passed:
+                    print(f"Fundamental Reject {ticker}: {reason}")
+                    return None
+    
+                score_data = self._calculate_upside_score(cand['df'], info_proxy, region)
+                
+                return {
                     "ticker": ticker,
-                    "df": df, 
-                    "price": current_price,
-                    "tech_score": rsi,
-                    "rsi": rsi,
-                    "vol_shock": current_vol/avg_vol_20
-                })
-             except: continue
-
-        # 3. Select Top 5 for Fundamental Analysis
-        tech_pass_candidates.sort(key=lambda x: x['vol_shock'], reverse=True)
-        top_candidates = tech_pass_candidates[:5]
-        
-        if not top_candidates: return []
-        
-        # 4. Fetch Fundamentals via Perplexity (Parallel with Fallback)
-        print("Fetching fundamentals via Perplexity API...")
-        final_list = []
-        
-        # Helper to fetch and process single candidate
-        def fetch_and_process(cand):
-            ticker = cand['ticker']
-            print(f"Analyzing Fundamentals: {ticker}")
-            
-            # Fetch Data
-            p_data = self._fetch_perplexity_fundamentals(ticker, region)
-            
-            # Helper: Safe Float
-            def safe_float(val, default=0.0):
-                try: 
-                    if val is None: return default
-                    return float(val)
-                except: return default
-
-            # Graceful Fallback Logic
-            # If p_data is empty (API Failed), assume passing stats to avoid blocking hot technical stocks
-            default_growth = 0.20 if not p_data else 0.0
-            default_roe = 0.20 if not p_data else 0.0
-            
-            # Construct Info Object for Scoring
-            rev_growth = safe_float(p_data.get('revenue_growth_yoy'), default_growth)
-            roe = safe_float(p_data.get('return_on_equity'), default_roe)
-            dte = safe_float(p_data.get('debt_to_equity'), 0.5) * 100 
-            
-            info_proxy = {
-                'quoteType': 'EQUITY', 
-                'revenueGrowth': rev_growth,
-                'returnOnEquity': roe,
-                'debtToEquity': dte,
-                'sector': p_data.get('sector', 'Unknown'),
-                'beta': safe_float(p_data.get('beta'), 1.0),
-                'targetMeanPrice': cand['price'] * 1.2 
-            }
-            
-            # Fundamental Check Logic
-            passed = True
-            reason = "Passed"
-            
-            if info_proxy['revenueGrowth'] < 0.15:
-                passed = False; reason = f"Low Growth: {info_proxy['revenueGrowth']:.2f}"
-            elif info_proxy['returnOnEquity'] < 0.18:
-                passed = False; reason = f"Low ROE: {info_proxy['returnOnEquity']:.2f}"
-            elif info_proxy['debtToEquity'] > 100: 
-                passed = False; reason = f"High Debt: {info_proxy['debtToEquity']:.2f}"
-            
-            if not passed:
-                print(f"Fundamental Reject {ticker}: {reason}")
-                return None
-
-            score_data = self._calculate_upside_score(cand['df'], info_proxy, region)
-            
-            return {
-                "ticker": ticker,
-                "price": round(cand['price'], 2),
-                "score": score_data['total_score'],
-                "upside_potential": score_data['upside_pct'],
-                "momentum_score": score_data['momentum_score'],
-                "rsi": round(cand['rsi'], 2),
-                "vol_shock": round(cand['vol_shock'], 2),
-                "sector": info_proxy['sector'],
-                "beta": info_proxy['beta']
-            }
-
-        # Run Parallel
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            results = executor.map(fetch_and_process, top_candidates)
-        
-        for res in results:
-            if res: final_list.append(res)
-                
-        # Safety Net: If all rejected or failed, return top technical candidates raw
-        if not final_list and top_candidates:
-             print("All fundamental checks failed/rejected. Returning top technical plays.")
-             for cand in top_candidates[:3]:
-                 final_list.append({
-                    "ticker": cand['ticker'],
                     "price": round(cand['price'], 2),
-                    "score": 75.0, 
-                    "upside_potential": 15.0,
-                    "momentum_score": 85.0,
+                    "score": score_data['total_score'],
+                    "upside_potential": score_data['upside_pct'],
+                    "momentum_score": score_data['momentum_score'],
                     "rsi": round(cand['rsi'], 2),
                     "vol_shock": round(cand['vol_shock'], 2),
-                    "sector": "Technicals Only",
-                    "beta": 1.0
-                })
-
-        # 5. Final Sort
-        final_list.sort(key=lambda x: x['score'], reverse=True)
-        return final_list
+                    "sector": info_proxy['sector'],
+                    "beta": info_proxy['beta']
+                }
+    
+            # Run Parallel
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                results = executor.map(fetch_and_process, top_candidates)
+            
+            for res in results:
+                if res: final_list.append(res)
+                    
+            # Safety Net: If all rejected or failed, return top technical candidates raw
+            if not final_list and top_candidates:
+                 print("All fundamental checks failed/rejected. Returning top technical plays.")
+                 for cand in top_candidates[:3]:
+                     final_list.append({
+                        "ticker": cand['ticker'],
+                        "price": round(cand['price'], 2),
+                        "score": 75.0, 
+                        "upside_potential": 15.0,
+                        "momentum_score": 85.0,
+                        "rsi": round(cand['rsi'], 2),
+                        "vol_shock": round(cand['vol_shock'], 2),
+                        "sector": "Technicals Only",
+                        "beta": 1.0
+                    })
+    
+            # 6. Final Sort & Cache
+            final_list.sort(key=lambda x: x['score'], reverse=True)
+            
+            # Update Cache
+            self.cache = final_list
+            self.last_scan_time = time.time()
+            
+            return final_list
+            
+        except Exception as e:
+            print(f"Scanner Critical Failure: {e}")
+            if self.cache:
+                print("Returning Stale Cache due to Failure")
+                return self.cache
+            # Retrying empty list handling by route
+            return []
 
 scanner = MarketScanner()
