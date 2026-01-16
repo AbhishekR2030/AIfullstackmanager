@@ -193,13 +193,46 @@ class MarketScanner:
             print(f"Perplexity Exception for {ticker}: {e}")
             return {}
 
-    def scan_market(self, region="IN"):
-        # 1. Cache Check
-        if self.cache and (time.time() - self.last_scan_time < self.CACHE_DURATION):
+    def scan_market(self, region="IN", thresholds=None):
+        """
+        Main scanning method with user-configurable thresholds.
+        
+        Args:
+            region: "IN" for India, "US" for US markets
+            thresholds: Dict with 'technical' and 'fundamental' sub-dicts
+        """
+        # Default thresholds if not provided
+        if thresholds is None:
+            thresholds = {}
+        
+        tech = thresholds.get('technical', {})
+        fund = thresholds.get('fundamental', {})
+        
+        # Technical Defaults
+        rsi_min = tech.get('rsi_min', 50)
+        rsi_max = tech.get('rsi_max', 70)
+        vol_min = tech.get('volatility_min', 3)
+        vol_max = tech.get('volatility_max', 8)
+        vol_shock_min = tech.get('volume_shock_min', 1.5)
+        
+        # Fundamental Defaults (in decimal, e.g., 0.10 for 10%)
+        rev_growth_min = fund.get('revenue_growth_min', 10) / 100
+        rev_growth_max = fund.get('revenue_growth_max', 100) / 100
+        profit_growth_min = fund.get('profit_growth_min', 10) / 100
+        profit_growth_max = fund.get('profit_growth_max', 100) / 100
+        roe_min = fund.get('roe_min', 12) / 100
+        roe_max = fund.get('roe_max', 100) / 100
+        roce_min = fund.get('roce_min', 12) / 100
+        roce_max = fund.get('roce_max', 100) / 100
+        de_min = fund.get('debt_equity_min', 0)
+        de_max = fund.get('debt_equity_max', 100)
+        
+        # 1. Cache Check (skip cache if custom thresholds provided)
+        if not thresholds and self.cache and (time.time() - self.last_scan_time < self.CACHE_DURATION):
             print("Returning Cached Scan Results (Speed Optimized)")
             return self.cache
 
-        print(f"Starting Scan ({region})...")
+        print(f"Starting Scan ({region}) with thresholds: RSI={rsi_min}-{rsi_max}, Vol={vol_min}-{vol_max}%...")
         
         try:
             tickers = self.loader.get_india_tickers() if region == "IN" else self.loader.get_us_tickers()
@@ -230,20 +263,22 @@ class MarketScanner:
                     turnover_usd = daily_turnover / usd_inr if region == "IN" else daily_turnover
                     if turnover_usd < 1_000_000: continue
                     
-                    # Volatility
+                    # Volatility (use thresholds)
                     monthly_vol = df['Close'].pct_change().tail(30).std() * np.sqrt(21) * 100
-                    if monthly_vol > 8.0 or monthly_vol < 3.0: continue
+                    if monthly_vol > vol_max or monthly_vol < vol_min: continue
     
                     # Momentum
                     sma_50 = df['Close'].rolling(50).mean().iloc[-1]
                     sma_20 = df['Close'].rolling(20).mean().iloc[-1]
                     if current_price <= sma_50 or current_price <= sma_20: continue
                     
+                    # RSI (use thresholds)
                     rsi = ta.rsi(df['Close'], length=14).iloc[-1]
-                    if not (50 <= rsi <= 70): continue
+                    if not (rsi_min <= rsi <= rsi_max): continue
                     
+                    # Volume Shock (use threshold)
                     current_vol = df['Volume'].iloc[-1]
-                    if current_vol <= (1.5 * avg_vol_20): continue
+                    if current_vol <= (vol_shock_min * avg_vol_20): continue
                     
                     macd = ta.macd(df['Close'])
                     hist = macd['MACDh_12_26_9'].iloc[-1]
@@ -252,15 +287,15 @@ class MarketScanner:
                     tech_pass_candidates.append({
                         "ticker": ticker,
                         "df": df, 
-                        "price": current_price,
-                        "tech_score": rsi,
-                        "rsi": rsi,
-                        "vol_shock": current_vol/avg_vol_20
+                        "price": float(current_price),
+                        "tech_score": float(rsi),
+                        "rsi": float(rsi),
+                        "vol_shock": float(current_vol/avg_vol_20)
                     })
                  except: continue
     
             # 4. Select Top 5 for Fundamental Analysis
-            tech_pass_candidates.sort(key=lambda x: x['vol_shock'], reverse=True)
+            tech_pass_candidates.sort(key=lambda x: x.get('vol_shock', 0), reverse=True)
             top_candidates = tech_pass_candidates[:5]
             
             if not top_candidates: 
@@ -273,7 +308,7 @@ class MarketScanner:
             
             # Helper to fetch and process single candidate
             def fetch_and_process(cand):
-                ticker = cand['ticker']
+                ticker = cand.get('ticker', 'UNKNOWN')
                 print(f"Analyzing Fundamentals: {ticker}")
                 
                 # Fetch Data
@@ -287,52 +322,59 @@ class MarketScanner:
                     except: return default
     
                 # Graceful Fallback Logic
-                # If p_data is empty (API Failed), assume passing stats to avoid blocking hot technical stocks
                 default_growth = 0.20 if not p_data else 0.0
                 default_roe = 0.20 if not p_data else 0.0
                 
                 # Construct Info Object for Scoring
                 rev_growth = safe_float(p_data.get('revenue_growth_yoy'), default_growth)
                 roe = safe_float(p_data.get('return_on_equity'), default_roe)
+                roce = safe_float(p_data.get('roce'), default_roe)
+                profit_growth = safe_float(p_data.get('profit_growth'), default_growth)
                 dte = safe_float(p_data.get('debt_to_equity'), 0.5) * 100 
                 
                 info_proxy = {
                     'quoteType': 'EQUITY', 
                     'revenueGrowth': rev_growth,
+                    'profitGrowth': profit_growth,
                     'returnOnEquity': roe,
+                    'roce': roce,
                     'debtToEquity': dte,
                     'sector': p_data.get('sector', 'Unknown'),
                     'beta': safe_float(p_data.get('beta'), 1.0),
-                    'targetMeanPrice': cand['price'] * 1.2 
+                    'targetMeanPrice': cand.get('price', 0) * 1.2 
                 }
                 
-                # Fundamental Check Logic
+                # Fundamental Check Logic (using user thresholds)
                 passed = True
                 reason = "Passed"
                 
-                if info_proxy['revenueGrowth'] < 0.15:
-                    passed = False; reason = f"Low Growth: {info_proxy['revenueGrowth']:.2f}"
-                elif info_proxy['returnOnEquity'] < 0.18:
-                    passed = False; reason = f"Low ROE: {info_proxy['returnOnEquity']:.2f}"
-                elif info_proxy['debtToEquity'] > 100: 
-                    passed = False; reason = f"High Debt: {info_proxy['debtToEquity']:.2f}"
+                if not (rev_growth_min <= info_proxy['revenueGrowth'] <= rev_growth_max):
+                    passed = False; reason = f"Revenue Growth: {info_proxy['revenueGrowth']:.2f} not in range"
+                elif not (roe_min <= info_proxy['returnOnEquity'] <= roe_max):
+                    passed = False; reason = f"ROE: {info_proxy['returnOnEquity']:.2f} not in range"
+                elif not (roce_min <= info_proxy.get('roce', 0) <= roce_max):
+                    passed = False; reason = f"ROCE: {info_proxy.get('roce', 0):.2f} not in range"
+                elif not (profit_growth_min <= info_proxy.get('profitGrowth', 0) <= profit_growth_max):
+                    passed = False; reason = f"Profit Growth: {info_proxy.get('profitGrowth', 0):.2f} not in range"
+                elif not (de_min <= info_proxy['debtToEquity'] <= de_max): 
+                    passed = False; reason = f"Debt/Equity: {info_proxy['debtToEquity']:.2f} not in range"
                 
                 if not passed:
                     print(f"Fundamental Reject {ticker}: {reason}")
                     return None
     
-                score_data = self._calculate_upside_score(cand['df'], info_proxy, region)
+                score_data = self._calculate_upside_score(cand.get('df'), info_proxy, region)
                 
                 return {
                     "ticker": ticker,
-                    "price": round(cand['price'], 2),
-                    "score": score_data['total_score'],
-                    "upside_potential": score_data['upside_pct'],
-                    "momentum_score": score_data['momentum_score'],
-                    "rsi": round(cand['rsi'], 2),
-                    "vol_shock": round(cand['vol_shock'], 2),
-                    "sector": info_proxy['sector'],
-                    "beta": info_proxy['beta']
+                    "price": round(cand.get('price', 0), 2),
+                    "score": score_data.get('total_score', 50),
+                    "upside_potential": score_data.get('upside_pct', 0),
+                    "momentum_score": score_data.get('momentum_score', 50),
+                    "rsi": round(cand.get('rsi', 50), 2),
+                    "vol_shock": round(cand.get('vol_shock', 1), 2),
+                    "sector": info_proxy.get('sector', 'Unknown'),
+                    "beta": info_proxy.get('beta', 1.0)
                 }
     
             # Run Parallel
@@ -347,32 +389,35 @@ class MarketScanner:
                  print("All fundamental checks failed/rejected. Returning top technical plays.")
                  for cand in top_candidates[:3]:
                      final_list.append({
-                        "ticker": cand['ticker'],
-                        "price": round(cand['price'], 2),
+                        "ticker": cand.get('ticker', 'UNKNOWN'),
+                        "price": round(cand.get('price', 0), 2),
                         "score": 75.0, 
                         "upside_potential": 15.0,
                         "momentum_score": 85.0,
-                        "rsi": round(cand['rsi'], 2),
-                        "vol_shock": round(cand['vol_shock'], 2),
+                        "rsi": round(cand.get('rsi', 50), 2),
+                        "vol_shock": round(cand.get('vol_shock', 1), 2),
                         "sector": "Technicals Only",
                         "beta": 1.0
                     })
     
             # 6. Final Sort & Cache
-            final_list.sort(key=lambda x: x['score'], reverse=True)
+            final_list.sort(key=lambda x: x.get('score', 0), reverse=True)
             
-            # Update Cache
-            self.cache = final_list
-            self.last_scan_time = time.time()
+            # Update Cache (only if default thresholds)
+            if not thresholds:
+                self.cache = final_list
+                self.last_scan_time = time.time()
             
             return final_list
             
         except Exception as e:
             print(f"Scanner Critical Failure: {e}")
+            import traceback
+            traceback.print_exc()
             if self.cache:
                 print("Returning Stale Cache due to Failure")
                 return self.cache
-            # Retrying empty list handling by route
             return []
 
 scanner = MarketScanner()
+

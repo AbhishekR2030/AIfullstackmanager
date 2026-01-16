@@ -85,9 +85,9 @@ export const fetchPortfolioHistory = async (period = '1y') => {
     }
 }
 
-export const fetchDiscoveryScan = async () => {
+export const fetchDiscoveryScan = async (thresholds = null) => {
     try {
-        const response = await api.get('/discovery/scan');
+        const response = await api.post('/discovery/scan', { thresholds });
         return response.data;
     } catch (error) {
         console.error("Error fetching discovery scan:", error);

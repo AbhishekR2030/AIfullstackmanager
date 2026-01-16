@@ -1,31 +1,38 @@
 import React, { useEffect, useState } from 'react';
 import { fetchDiscoveryScan } from '../services/api';
 import StockCard from '../components/StockCard';
-import { RefreshCw, ArrowRight, TrendingUp, AlertTriangle, CheckCircle } from 'lucide-react';
+import ThresholdsModal, { DEFAULT_THRESHOLDS } from '../components/ThresholdsModal';
+import { RefreshCw, ArrowRight, TrendingUp, AlertTriangle, CheckCircle, Settings } from 'lucide-react';
 import './Discovery.css';
 
 const Discovery = () => {
     const [scanData, setScanData] = useState(null);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
+    const [showThresholds, setShowThresholds] = useState(false);
+    const [thresholds, setThresholds] = useState(DEFAULT_THRESHOLDS);
 
-    useEffect(() => {
-        loadData();
-    }, []);
+    // Don't auto-load on mount - wait for user to set thresholds or click scan
+    // useEffect(() => { loadData(); }, []);
 
-    const loadData = async () => {
+    const loadData = async (customThresholds = thresholds) => {
         try {
             setLoading(true);
-            const data = await fetchDiscoveryScan();
+            setError(null);
+            const data = await fetchDiscoveryScan(customThresholds);
             setScanData(data);
         } catch (err) {
+            console.error("Scan error:", err);
             setError("Failed to scan market. Server might be busy.");
         } finally {
             setLoading(false);
         }
     };
 
-
+    const handleApplyThresholds = (newThresholds) => {
+        setThresholds(newThresholds);
+        loadData(newThresholds);
+    };
 
     return (
         <div className="discovery-page">
@@ -34,11 +41,33 @@ const Discovery = () => {
                     <h1>Market Opportunities</h1>
                     <p className="text-muted">AI-Scanner: Nifty 500 Momentum, RSI & Volatility Check</p>
                 </div>
-                <button className="btn-scan" onClick={loadData} disabled={loading}>
-                    <RefreshCw size={18} className={loading ? 'spin' : ''} />
-                    <span>Scan Now</span>
-                </button>
+                <div className="header-actions">
+                    <button
+                        className="btn-thresholds"
+                        onClick={() => setShowThresholds(true)}
+                        disabled={loading}
+                    >
+                        <Settings size={18} />
+                        <span>Thresholds</span>
+                    </button>
+                    <button
+                        className="btn-scan"
+                        onClick={() => loadData()}
+                        disabled={loading}
+                    >
+                        <RefreshCw size={18} className={loading ? 'spin' : ''} />
+                        <span>Scan Now</span>
+                    </button>
+                </div>
             </div>
+
+            {/* Thresholds Modal */}
+            <ThresholdsModal
+                isOpen={showThresholds}
+                onClose={() => setShowThresholds(false)}
+                onApply={handleApplyThresholds}
+                initialThresholds={thresholds}
+            />
 
             {loading ? (
                 <div className="loading-container">
@@ -47,6 +76,12 @@ const Discovery = () => {
                 </div>
             ) : error ? (
                 <div className="error-container"><p className="text-danger">{error}</p></div>
+            ) : !scanData ? (
+                <div className="empty-state">
+                    <Settings size={48} className="empty-icon" />
+                    <h3>Configure Thresholds & Scan</h3>
+                    <p>Click "Thresholds" to set your screening criteria, then "Scan Now" to find opportunities.</p>
+                </div>
             ) : (
                 <div className="scan-results-container">
 
@@ -78,30 +113,34 @@ const Discovery = () => {
                     <div className="section-card">
                         <h3 className="section-title"><TrendingUp size={20} color="#10b981" /> Top Buy Candidates (Nifty 500)</h3>
                         <div className="stocks-grid">
-                            {scanData.scan_results.map((stock) => (
+                            {scanData.scan_results && scanData.scan_results.map((stock) => (
                                 <StockCard key={stock.ticker} stock={stock} />
                             ))}
                         </div>
-                        {scanData.scan_results.length === 0 && <p className="text-muted">No strong buy signals found today.</p>}
+                        {(!scanData.scan_results || scanData.scan_results.length === 0) &&
+                            <p className="text-muted">No strong buy signals found with current thresholds.</p>
+                        }
                     </div>
 
                     {/* 3. Portfolio Health */}
-                    <div className="section-card">
-                        <h3 className="section-title"><CheckCircle size={20} color="#3b82f6" /> Portfolio Health Check</h3>
-                        <div className="portfolio-health-list">
-                            {scanData.portfolio_analysis.map((asset, idx) => (
-                                <div key={idx} className={`health-item ${asset.recommendation.toLowerCase()}`}>
-                                    <div className="health-ticker">{asset.ticker}</div>
-                                    <div className="health-badge">
-                                        {asset.recommendation.replace('_', ' ')}
+                    {scanData.portfolio_analysis && scanData.portfolio_analysis.length > 0 && (
+                        <div className="section-card">
+                            <h3 className="section-title"><CheckCircle size={20} color="#3b82f6" /> Portfolio Health Check</h3>
+                            <div className="portfolio-health-list">
+                                {scanData.portfolio_analysis.map((asset, idx) => (
+                                    <div key={idx} className={`health-item ${asset.recommendation.toLowerCase()}`}>
+                                        <div className="health-ticker">{asset.ticker}</div>
+                                        <div className="health-badge">
+                                            {asset.recommendation.replace('_', ' ')}
+                                        </div>
+                                        <div className="health-details">
+                                            Age: {asset.age_days}d | Trend: {asset.trend}
+                                        </div>
                                     </div>
-                                    <div className="health-details">
-                                        Age: {asset.age_days}d | Trend: {asset.trend}
-                                    </div>
-                                </div>
-                            ))}
+                                ))}
+                            </div>
                         </div>
-                    </div>
+                    )}
 
                 </div>
             )}

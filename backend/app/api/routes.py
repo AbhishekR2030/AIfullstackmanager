@@ -218,15 +218,35 @@ from app.engines.rebalancer_engine import RebalancerEngine
 market_scanner = MarketScanner()
 rebalancer = RebalancerEngine()
 
-# Legacy synchronous scan (kept for backward compatibility)
-@router.get("/discovery/scan")
-async def scan_opportunities(current_user = Depends(get_current_user)):
+# Thresholds Request Model
+class ThresholdsBody(BaseModel):
+    technical: Optional[dict] = None
+    fundamental: Optional[dict] = None
+
+class ScanRequestBody(BaseModel):
+    thresholds: Optional[ThresholdsBody] = None
+
+# Main Discovery Scan Endpoint (POST with thresholds)
+@router.post("/discovery/scan")
+async def scan_opportunities(
+    request: ScanRequestBody = ScanRequestBody(),
+    current_user = Depends(get_current_user)
+):
     """
     Scans for new buy opportunities and rebalancing candidates.
+    Accepts user-defined thresholds for screening.
     """
     try:
-        # 1. Run Market Scanner
-        buy_candidates = market_scanner.scan_market()
+        # Extract thresholds from request
+        thresholds = None
+        if request.thresholds:
+            thresholds = {
+                "technical": request.thresholds.technical or {},
+                "fundamental": request.thresholds.fundamental or {}
+            }
+        
+        # 1. Run Market Scanner with thresholds
+        buy_candidates = market_scanner.scan_market(thresholds=thresholds)
         
         # 2. Analyze Portfolio (Rebalancer)
         user_portfolio = portfolio_manager.get_portfolio(current_user.email)
@@ -237,10 +257,10 @@ async def scan_opportunities(current_user = Depends(get_current_user)):
             top_pick = buy_candidates[0]
             # Check if thesis already exists or generate it
             if "thesis" not in top_pick:
-                print(f"Generating Investment Thesis for Top Pick: {top_pick['ticker']}...")
+                print(f"Generating Investment Thesis for Top Pick: {top_pick.get('ticker', 'UNKNOWN')}...")
                 try:
                     # This call uses Gemini 2.0 Flash (Fast)
-                    analysis = analyst.generate_thesis(top_pick['ticker'])
+                    analysis = analyst.generate_thesis(top_pick.get('ticker', ''))
                     if "error" not in analysis:
                         top_pick["thesis"] = analysis.get("thesis", [])
                         top_pick["risk_factors"] = analysis.get("risk_factors", [])
@@ -257,31 +277,24 @@ async def scan_opportunities(current_user = Depends(get_current_user)):
         }
         
         # Organize holdings
-        # Sort potential sells by worst performance first? Or just weakest trend.
         for asset in analyzed_holdings:
-            if asset['recommendation'] == 'SELL_CANDIDATE':
+            if asset.get('recommendation') == 'SELL_CANDIDATE':
                 recommendations['sell_candidates'].append(asset)
             else:
                 recommendations['keepers'].append(asset)
                 
-        # If we have sell candidates and buy candidates, create specific swap suggestions
+        # If we have sell candidates and buy candidates, create swap suggestions
         swap_opportunities = []
         if recommendations['sell_candidates'] and buy_candidates:
-            # We pair the WORST asset (highest negative returns / broken trend) 
-            # with the BEST buy candidate (highest score).
-            
-            # Sort Sells: Weakest first (lowest pl_percent)
-            sorted_sells = sorted(recommendations['sell_candidates'], key=lambda x: x['pl_percent'])
-            
-            # Top Buy is already sorted by Score
+            sorted_sells = sorted(recommendations['sell_candidates'], key=lambda x: x.get('pl_percent', 0))
             top_buy = buy_candidates[0]
             
             for index, sell in enumerate(sorted_sells):
                 swap_opportunities.append({
                     "priority": index + 1,
-                    "sell": sell['ticker'],
-                    "buy": top_buy['ticker'],
-                    "reason": f"Sell weak {sell['ticker']} (Trend {sell['trend']}, Returns {sell['pl_percent']}%) to buy strong {top_buy['ticker']} (Momentum Score {top_buy['score']})"
+                    "sell": sell.get('ticker', 'UNKNOWN'),
+                    "buy": top_buy.get('ticker', 'UNKNOWN'),
+                    "reason": f"Sell weak {sell.get('ticker')} (Trend {sell.get('trend')}, Returns {sell.get('pl_percent')}%) to buy strong {top_buy.get('ticker')} (Momentum Score {top_buy.get('score')})"
                 })
         
         return {
@@ -292,6 +305,8 @@ async def scan_opportunities(current_user = Depends(get_current_user)):
 
     except Exception as e:
         print(f"Discovery Error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 from app.engines.search_engine import SearchEngine
