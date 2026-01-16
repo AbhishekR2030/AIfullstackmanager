@@ -1,0 +1,54 @@
+# Render Blueprint - Multi-Service Deployment
+# This deploys: Backend API + Celery Worker + Redis
+
+services:
+  # ============================================
+  # 1. FASTAPI BACKEND (Web Service)
+  # ============================================
+  - type: web
+    name: alphaseeker-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    rootDir: ./backend
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: alphaseeker-redis
+          property: connectionString
+      - key: GOOGLE_API_KEY
+        sync: false  # Set manually in Render dashboard
+      - key: PERPLEXITY_API_KEY
+        sync: false
+      - key: JWT_SECRET_KEY
+        sync: false
+    healthCheckPath: /
+    autoDeploy: true
+
+  # ============================================
+  # 2. CELERY WORKER (Background Worker)
+  # ============================================
+  - type: worker
+    name: alphaseeker-celery-worker
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile.worker
+    rootDir: ./backend
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: alphaseeker-redis
+          property: connectionString
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: PERPLEXITY_API_KEY
+        sync: false
+    autoDeploy: true
+
+# ============================================
+# 3. REDIS (Managed Database)
+# ============================================
+databases:
+  - name: alphaseeker-redis
+    plan: starter  # Free tier: 25MB
+    ipAllowList: []  # Allow all IPs (internal only)

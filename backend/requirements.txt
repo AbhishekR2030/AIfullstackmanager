@@ -16,3 +16,6 @@ python-jose[cryptography]
 passlib[bcrypt]
 ta
 pandas-ta
+celery[redis]
+redis
+flower

@@ -218,6 +218,7 @@ from app.engines.rebalancer_engine import RebalancerEngine
 market_scanner = MarketScanner()
 rebalancer = RebalancerEngine()
 
+# Legacy synchronous scan (kept for backward compatibility)
 @router.get("/discovery/scan")
 async def scan_opportunities(current_user = Depends(get_current_user)):
     """
@@ -305,3 +306,139 @@ async def search_ticker(q: str):
         return search_engine.search(q)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# ASYNC DISCOVERY ENDPOINTS (Celery + Redis)
+# ============================================================================
+from app.workers.tasks import master_scan_workflow, get_scan_progress, get_scan_results
+from celery.result import AsyncResult
+from app.core.celery_app import celery_app
+
+class ScanRequest(BaseModel):
+    region: str = "IN"
+
+@router.post("/discovery/scan/async")
+async def trigger_async_scan(
+    request: ScanRequest = ScanRequest(),
+    current_user = Depends(get_current_user)
+):
+    """
+    Triggers an async market scan. Returns job_id immediately.
+    Use /discovery/status/{job_id} to check progress.
+    Use /discovery/results/{job_id} to get final results.
+    """
+    try:
+        # Trigger Celery task
+        task = master_scan_workflow.delay(request.region)
+        
+        return {
+            "job_id": task.id,
+            "status": "pending",
+            "message": "Scan started. Check /discovery/status/{job_id} for progress."
+        }
+        
+    except Exception as e:
+        print(f"Async Scan Trigger Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/discovery/status/{job_id}")
+async def get_scan_status(job_id: str, current_user = Depends(get_current_user)):
+    """
+    Get the current status/progress of an async scan job.
+    
+    Returns:
+        - state: PENDING, PROGRESS, SUCCESS, FAILURE
+        - percent: 0-100 progress
+        - message: Current status message
+    """
+    try:
+        # Get Celery task result
+        task_result = AsyncResult(job_id, app=celery_app)
+        
+        # Get progress from Redis
+        progress = get_scan_progress(job_id)
+        
+        response = {
+            "job_id": job_id,
+            "state": task_result.state,
+            "percent": 0,
+            "message": "Initializing..."
+        }
+        
+        if progress:
+            response["percent"] = progress.get("percent", 0)
+            response["message"] = progress.get("message", "Processing...")
+        
+        if task_result.state == "SUCCESS":
+            response["percent"] = 100
+            response["message"] = "Scan complete!"
+            response["result_ready"] = True
+            
+        elif task_result.state == "FAILURE":
+            response["percent"] = -1
+            response["message"] = f"Scan failed: {str(task_result.result)}"
+            response["error"] = str(task_result.result)
+        
+        return response
+        
+    except Exception as e:
+        print(f"Status Check Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/discovery/results/{job_id}")
+async def get_async_scan_results(job_id: str, current_user = Depends(get_current_user)):
+    """
+    Get the final results of a completed async scan.
+    Only returns data if the scan is complete.
+    """
+    try:
+        # Check task status first
+        task_result = AsyncResult(job_id, app=celery_app)
+        
+        if task_result.state != "SUCCESS":
+            return {
+                "job_id": job_id,
+                "state": task_result.state,
+                "message": "Scan not yet complete. Check /discovery/status/{job_id}",
+                "results": None
+            }
+        
+        # Get results from Redis cache
+        results = get_scan_results(job_id)
+        
+        if results:
+            return {
+                "job_id": job_id,
+                "state": "SUCCESS",
+                "count": len(results),
+                "scan_results": results,
+                "portfolio_analysis": [],
+                "swap_opportunities": []
+            }
+        
+        # Fallback to Celery result
+        celery_result = task_result.result
+        if celery_result and "results" in celery_result:
+            return {
+                "job_id": job_id,
+                "state": "SUCCESS",
+                "count": celery_result.get("count", 0),
+                "scan_results": celery_result.get("results", []),
+                "portfolio_analysis": [],
+                "swap_opportunities": []
+            }
+        
+        return {
+            "job_id": job_id,
+            "state": "SUCCESS",
+            "message": "No results found",
+            "scan_results": []
+        }
+        
+    except Exception as e:
+        print(f"Results Fetch Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
