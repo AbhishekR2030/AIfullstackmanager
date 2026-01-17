@@ -351,12 +351,18 @@ class HDFCEngine:
         Fetches trade book from HDFC API to get actual purchase dates.
         Returns a dict mapping security_id/isin to the earliest fill_timestamp.
         """
+        import sys
+        
+        print("[TRADE_BOOK] Starting fetch_tradebook_dates...", flush=True)
+        
         if not self.api_key or not self.access_token:
-            print("Trade Book: Skipping - no credentials")
+            print("[TRADE_BOOK] Skipping - no credentials", flush=True)
             return {}
         
         try:
             url = f"{self.base_url}/trades"
+            print(f"[TRADE_BOOK] Calling URL: {url}", flush=True)
+            
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
                 "x-api-key": self.api_key,
@@ -365,23 +371,31 @@ class HDFCEngine:
             params = {"api_key": self.api_key}
             
             response = requests.get(url, headers=headers, params=params, timeout=15)
+            print(f"[TRADE_BOOK] Response status: {response.status_code}", flush=True)
             
             if response.status_code != 200:
-                print(f"Trade Book API Error: {response.status_code}")
+                print(f"[TRADE_BOOK] API Error: {response.status_code} - {response.text[:500]}", flush=True)
                 return {}
             
             data = response.json()
             
             # DEBUG: Log trade book response
-            print("="*60)
-            print("HDFC TRADE BOOK RESPONSE:")
-            print("="*60)
+            print("="*60, flush=True)
+            print("[TRADE_BOOK] HDFC TRADE BOOK RESPONSE:", flush=True)
+            print("="*60, flush=True)
             import json as json_module
-            print(json_module.dumps(data, indent=2)[:1500])
+            print(json_module.dumps(data, indent=2)[:2000], flush=True)
+            
             if isinstance(data.get("data"), list) and len(data["data"]) > 0:
-                print("\nTRADE BOOK FIRST ITEM KEYS:")
-                print(list(data["data"][0].keys()))
-            print("="*60)
+                print(f"\n[TRADE_BOOK] Found {len(data['data'])} trades", flush=True)
+                print("[TRADE_BOOK] FIRST ITEM KEYS:", flush=True)
+                print(list(data["data"][0].keys()), flush=True)
+                print("[TRADE_BOOK] FIRST ITEM VALUES:", flush=True)
+                print(data["data"][0], flush=True)
+            else:
+                print("[TRADE_BOOK] No trades found in response", flush=True)
+            print("="*60, flush=True)
+            sys.stdout.flush()
             
             trades_list = data.get("data", [])
             if isinstance(data, list):
