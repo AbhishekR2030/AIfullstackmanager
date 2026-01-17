@@ -321,7 +321,9 @@ class MarketScanner:
                  return []
             
             # 5. Fetch Fundamentals via Yahoo Finance (FREE - no API key needed)
-            print("Fetching fundamentals via Yahoo Finance...")
+            print("=" * 50, flush=True)
+            print("[DEPLOY v2.0] Fetching fundamentals via YAHOO FINANCE (not FMP!)", flush=True)
+            print("=" * 50, flush=True)
             final_list = []
             
             # Helper to fetch and process single candidate
