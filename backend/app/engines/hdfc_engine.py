@@ -266,7 +266,20 @@ class HDFCEngine:
 
                 if qty < 0.01: continue
                 
-                buy_date = item.get("date", datetime.now().strftime("%Y-%m-%d"))
+                # Try multiple fields for buy date
+                buy_date = None
+                for date_field in ['purchase_date', 'buy_date', 'date', 'trade_date', 'settlement_date']:
+                    if item.get(date_field):
+                        buy_date = item.get(date_field)
+                        break
+                
+                # If still no date, use a reasonable default (90 days ago)
+                # This ensures age calculation works and portfolio history can be constructed
+                if not buy_date:
+                    from datetime import timedelta
+                    buy_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+                    print(f"No date found for {ticker}, using default 90 days ago")
+
 
                 # Aggregation
                 if ticker in aggregated_holdings:
