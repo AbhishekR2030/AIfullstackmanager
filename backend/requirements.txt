@@ -11,6 +11,7 @@ requests
 beautifulsoup4
 sqlalchemy
 asyncpg
+psycopg2-binary
 python-multipart
 python-jose[cryptography]
 passlib[bcrypt]

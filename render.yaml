@@ -1,5 +1,5 @@
 # Render Blueprint - Multi-Service Deployment
-# This deploys: Backend API + Celery Worker + Redis
+# This deploys: Backend API + Celery Worker + Redis + PostgreSQL
 
 services:
   # ============================================
@@ -16,11 +16,21 @@ services:
           type: redis
           name: alphaseeker-redis
           property: connectionString
+      - key: DATABASE_URL
+        fromDatabase:
+          name: alphaseeker-db
+          property: connectionString
       - key: GOOGLE_API_KEY
         sync: false  # Set manually in Render dashboard
       - key: PERPLEXITY_API_KEY
         sync: false
       - key: JWT_SECRET_KEY
+        sync: false
+      - key: HDFC_API_KEY
+        sync: false
+      - key: HDFC_API_SECRET
+        sync: false
+      - key: HDFC_ACCESS_TOKEN
         sync: false
     healthCheckPath: /
     autoDeploy: true
@@ -39,6 +49,10 @@ services:
           type: redis
           name: alphaseeker-redis
           property: connectionString
+      - key: DATABASE_URL
+        fromDatabase:
+          name: alphaseeker-db
+          property: connectionString
       - key: GOOGLE_API_KEY
         sync: false
       - key: PERPLEXITY_API_KEY
@@ -46,9 +60,16 @@ services:
     autoDeploy: true
 
 # ============================================
-# 3. REDIS (Managed Database)
+# DATABASES
 # ============================================
 databases:
+  # PostgreSQL for persistent data (users, portfolio)
+  - name: alphaseeker-db
+    plan: free  # Free tier: 1GB storage, 90 day expiry
+    databaseName: alphaseeker
+    user: alphaseeker_user
+
+  # Redis for caching and Celery
   - name: alphaseeker-redis
     plan: starter  # Free tier: 25MB
     ipAllowList: []  # Allow all IPs (internal only)
