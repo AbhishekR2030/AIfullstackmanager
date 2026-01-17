@@ -3,87 +3,112 @@ from datetime import datetime, timedelta
 import pandas as pd
 import json
 import os
+from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
-# Persistent Storage File
-DB_FILE = "portfolio_db.json"
+# Use the same database as auth
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./users.db")
+
+# Handle postgres:// vs postgresql:// for SQLAlchemy 1.4+
+if SQLALCHEMY_DATABASE_URL.startswith("postgres://"):
+    SQLALCHEMY_DATABASE_URL = SQLALCHEMY_DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, 
+    connect_args={"check_same_thread": False} if "sqlite" in SQLALCHEMY_DATABASE_URL else {}
+)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Portfolio Model
+class PortfolioItem(Base):
+    __tablename__ = "portfolio_items"
+    id = Column(Integer, primary_key=True, index=True)
+    user_email = Column(String, index=True)
+    ticker = Column(String)
+    company_name = Column(String, nullable=True)
+    quantity = Column(Integer)
+    buy_price = Column(Float)
+    buy_date = Column(String)
+    source = Column(String, default="MANUAL")
+
+# Create tables
+Base.metadata.create_all(bind=engine)
 
 class PortfolioEngine:
     def __init__(self):
-        self.db_file = DB_FILE
-        self.portfolio_db = {} 
-        # DB Reloaded on Init - Stale Cache Cleared 
-        self._load_db()
+        pass
 
-    def _load_db(self):
-        """Loads portfolio from JSON file with migration support."""
-        if os.path.exists(self.db_file):
-            try:
-                with open(self.db_file, "r") as f:
-                    data = json.load(f)
-                    
-                    # Migration: If data is a list (legacy single-user), map it to the admin email
-                    if isinstance(data, list):
-                        print("Migrating legacy portfolio to Multi-User format...")
-                        self.portfolio_db = { "chabhishekreddy@gmail.com": data }
-                        self._save_db()
-                    else:
-                        self.portfolio_db = data
-            except Exception as e:
-                print(f"Error loading DB: {e}")
-                self.portfolio_db = {}
-        else:
-            self.portfolio_db = {}
-
-    def _save_db(self):
-        """Saves portfolio to JSON file."""
-        try:
-            with open(self.db_file, "w") as f:
-                json.dump(self.portfolio_db, f, indent=4)
-        except Exception as e:
-            print(f"Error saving DB: {e}")
+    def _get_db(self):
+        return SessionLocal()
 
     def add_trade(self, trade_data, user_email):
-        if user_email not in self.portfolio_db:
-            self.portfolio_db[user_email] = []
-        
-        # Default source to MANUAL if not specified
-        if "source" not in trade_data:
-            trade_data["source"] = "MANUAL"
-            
-        self.portfolio_db[user_email].append(trade_data)
-        self._save_db()
-        return {"message": "Trade added successfully", "trade": trade_data}
+        db = self._get_db()
+        try:
+            item = PortfolioItem(
+                user_email=user_email,
+                ticker=trade_data.get('ticker'),
+                company_name=trade_data.get('company_name', ''),
+                quantity=int(trade_data.get('quantity', 0)),
+                buy_price=float(trade_data.get('buy_price', 0)),
+                buy_date=trade_data.get('buy_date', datetime.now().strftime("%Y-%m-%d")),
+                source=trade_data.get('source', 'MANUAL')
+            )
+            db.add(item)
+            db.commit()
+            return {"message": "Trade added successfully", "trade": trade_data}
+        finally:
+            db.close()
 
     def sync_hdfc_trades(self, hdfc_trades, user_email):
         """
-        Replaces ALL existing trades with the fresh batch from HDFC.
-        This effectively clears stale or manual trades that are no longer owned,
-        making HDFC the single source of truth as requested by the user.
+        Replaces ALL existing HDFC trades with the fresh batch.
+        This ensures the portfolio is always up-to-date with HDFC.
         """
-        # Overwrite user portfolio directly
-        self.portfolio_db[user_email] = hdfc_trades
-        self._save_db()
-        
-        return {
-            "message": "Portfolio fully synced with HDFC (Overwritten)", 
-            "added_count": len(hdfc_trades),
-            "total_count": len(hdfc_trades)
-        }
-
+        db = self._get_db()
+        try:
+            # Delete existing HDFC trades for this user
+            db.query(PortfolioItem).filter(
+                PortfolioItem.user_email == user_email,
+                PortfolioItem.source == "HDFC"
+            ).delete()
+            
+            # Add new trades
+            for trade in hdfc_trades:
+                item = PortfolioItem(
+                    user_email=user_email,
+                    ticker=trade.get('ticker'),
+                    company_name=trade.get('company_name', ''),
+                    quantity=int(trade.get('quantity', 0)),
+                    buy_price=float(trade.get('buy_price', 0)),
+                    buy_date=trade.get('buy_date', datetime.now().strftime("%Y-%m-%d")),
+                    source="HDFC"
+                )
+                db.add(item)
+            
+            db.commit()
+            return {
+                "message": "Portfolio fully synced with HDFC", 
+                "added_count": len(hdfc_trades),
+                "total_count": len(hdfc_trades)
+            }
+        finally:
+            db.close()
 
     def delete_trade(self, ticker, user_email):
-        if user_email not in self.portfolio_db:
-             return {"message": "User not found", "success": False}
-
-        user_portfolio = self.portfolio_db[user_email]
-        initial_len = len(user_portfolio)
-        self.portfolio_db[user_email] = [t for t in user_portfolio if t['ticker'] != ticker]
-        
-        if len(self.portfolio_db[user_email]) == initial_len:
-             return {"message": "Trade not found", "success": False}
-        
-        self._save_db()
-        return {"message": "Trade deleted successfully", "success": True}
+        db = self._get_db()
+        try:
+            deleted = db.query(PortfolioItem).filter(
+                PortfolioItem.user_email == user_email,
+                PortfolioItem.ticker == ticker
+            ).delete()
+            db.commit()
+            if deleted:
+                return {"message": "Trade deleted successfully", "success": True}
+            return {"message": "Trade not found", "success": False}
+        finally:
+            db.close()
 
     def _sanitize_float(self, val):
         import math
@@ -100,10 +125,29 @@ class PortfolioEngine:
         """
         Returns portfolio with live metrics for specific user.
         """
-        if user_email not in self.portfolio_db or not self.portfolio_db[user_email]:
-            return []
+        db = self._get_db()
+        try:
+            items = db.query(PortfolioItem).filter(
+                PortfolioItem.user_email == user_email
+            ).all()
+            
+            if not items:
+                return []
+            
+            user_trades = [
+                {
+                    "ticker": item.ticker,
+                    "company_name": item.company_name,
+                    "quantity": item.quantity,
+                    "buy_price": item.buy_price,
+                    "buy_date": item.buy_date,
+                    "source": item.source
+                }
+                for item in items
+            ]
+        finally:
+            db.close()
 
-        user_trades = self.portfolio_db[user_email]
         tickers = [t['ticker'] for t in user_trades]
         market_data = None
         
@@ -141,11 +185,9 @@ class PortfolioEngine:
                             val = market_data[ticker].iloc[-1]
                             current_price = float(val)
                 except Exception as ex:
-                    # print(f"Price extract error for {ticker}: {ex}")
                     pass
 
             # 3. Calculate Metrics
-            # Sanitize current price first
             current_price = self._sanitize_float(current_price)
             
             total_value = current_price * qty
@@ -165,11 +207,26 @@ class PortfolioEngine:
         return enriched_portfolio
 
     def get_portfolio_history(self, user_email, period="1y"):
-        # Re-implemented history with safe checks
-        if user_email not in self.portfolio_db or not self.portfolio_db[user_email]:
-            return {"dates": [], "portfolio_value": [], "invested_value": []}
+        db = self._get_db()
+        try:
+            items = db.query(PortfolioItem).filter(
+                PortfolioItem.user_email == user_email
+            ).all()
             
-        user_trades = self.portfolio_db[user_email]
+            if not items:
+                return {"dates": [], "portfolio_value": [], "invested_value": []}
+            
+            user_trades = [
+                {
+                    "ticker": item.ticker,
+                    "quantity": item.quantity,
+                    "buy_price": item.buy_price,
+                    "buy_date": item.buy_date
+                }
+                for item in items
+            ]
+        finally:
+            db.close()
 
         tickers = list(set([t['ticker'] for t in user_trades]))
         
@@ -197,16 +254,10 @@ class PortfolioEngine:
         
         try:
             data = yf.download(tickers, start=start_date, progress=False)
-            # Normalize data structure to Just 'Close' prices
             if 'Close' in data.columns:
                 data = data['Close']
             
-            # If MultiIndex with columns (Price, Ticker), we need to handle it.
-            # yfinance recent versions are tricky.
-            # If we requested multiple tickers, data is DataFrame with columns=tickers.
-            # If single ticker, columns might be just 'Close' (Series) or DataFrame with 'Open','Close'.
             if len(tickers) == 1 and isinstance(data, pd.DataFrame) and tickers[0] not in data.columns:
-                 # Rename 'Close' to ticker name for consistent logic below
                  data = data.rename(columns={"Close": tickers[0]})
             
         except Exception as e:
@@ -221,9 +272,9 @@ class PortfolioEngine:
             ticker = trade['ticker']
             qty = float(trade['quantity'])
             buy_price = float(trade['buy_price'])
-            # Robust Date Parsing for Trace
+            
             d_str = trade.get('buy_date', '')
-            buy_date_ts = pd.Timestamp.now() # Fallback
+            buy_date_ts = pd.Timestamp.now()
             for fmt in ["%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d"]:
                 try:
                     buy_date_ts = pd.Timestamp(datetime.strptime(d_str, fmt))
@@ -233,10 +284,8 @@ class PortfolioEngine:
             
             invested_series.loc[buy_date_ts:] += (buy_price * qty)
             
-            # Find price series for this ticker
             price_series = None
             if isinstance(data, pd.Series):
-                 # Single ticker scenario
                  price_series = data
             elif isinstance(data, pd.DataFrame) and ticker in data.columns:
                  price_series = data[ticker]
@@ -247,8 +296,8 @@ class PortfolioEngine:
                  val_contrib = val_contrib.where(val_contrib.index >= buy_date_ts, 0)
                  total_value_series = total_value_series.add(val_contrib, fill_value=0)
 
-        # Filter
-        start_filter = earliest_date # Default
+        # Filter by period
+        start_filter = earliest_date
         end_date = datetime.now()
         if period == "1mo": start_filter = end_date - timedelta(days=30)
         elif period == "3mo": start_filter = end_date - timedelta(days=90)
@@ -266,3 +315,5 @@ class PortfolioEngine:
             "portfolio_value": final_values,
             "invested_value": final_invested
         }
+
+portfolio_manager = PortfolioEngine()
