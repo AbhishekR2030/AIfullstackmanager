@@ -399,31 +399,38 @@ class MarketScanner:
     
                 score_data = self._calculate_upside_score(cand.get('df'), info_proxy, region)
                 
-                # Build fundamental thesis summary
-                fund_thesis_parts = []
-                if info_proxy['revenueGrowth'] > 0.15:
-                    fund_thesis_parts.append(f"Strong revenue growth ({info_proxy['revenueGrowth']*100:.1f}%)")
-                elif info_proxy['revenueGrowth'] > 0:
-                    fund_thesis_parts.append(f"Positive revenue growth ({info_proxy['revenueGrowth']*100:.1f}%)")
-                    
-                if info_proxy['returnOnEquity'] > 0.15:
-                    fund_thesis_parts.append(f"High ROE ({info_proxy['returnOnEquity']*100:.1f}%)")
-                    
-                if info_proxy.get('roce', 0) > 0.15:
-                    fund_thesis_parts.append(f"Strong ROCE ({info_proxy.get('roce', 0)*100:.1f}%)")
-                    
-                if info_proxy.get('profitGrowth', 0) > 0.10:
-                    fund_thesis_parts.append(f"Profit growth ({info_proxy.get('profitGrowth', 0)*100:.1f}%)")
-                    
-                if info_proxy['debtToEquity'] < 50:
-                    fund_thesis_parts.append("Low debt")
-                elif info_proxy['debtToEquity'] < 100:
-                    fund_thesis_parts.append("Manageable debt")
+                # Build comprehensive thesis with ALL metrics
+                rev_val = info_proxy['revenueGrowth'] * 100
+                roe_val = info_proxy['returnOnEquity'] * 100
+                roce_val = info_proxy.get('roce', 0) * 100
+                profit_val = info_proxy.get('profitGrowth', 0) * 100
+                de_val = info_proxy['debtToEquity']
                 
+                # Format metrics summary (show all values vs thresholds)
+                metrics_summary = (
+                    f"📊 RevGrowth: {rev_val:.1f}% (target: {rev_growth_min*100:.0f}%-{rev_growth_max*100:.0f}%) | "
+                    f"ROE: {roe_val:.1f}% (target: {roe_min*100:.0f}%-{roe_max*100:.0f}%) | "
+                    f"ROCE: {roce_val:.1f}% (target: {roce_min*100:.0f}%-{roce_max*100:.0f}%) | "
+                    f"ProfitGrowth: {profit_val:.1f}% (target: {profit_growth_min*100:.0f}%-{profit_growth_max*100:.0f}%) | "
+                    f"D/E: {de_val:.1f} (target: {de_min}-{de_max})"
+                )
+                
+                # Technical reasoning (why this stock was picked)
+                tech_reason_parts = []
+                tech_reason_parts.append(f"📈 Momentum: {score_data.get('momentum_score', 50):.0f}")
+                tech_reason_parts.append(f"RSI: {cand.get('rsi', 50):.1f}")
+                tech_reason_parts.append(f"Volume Shock: {cand.get('vol_shock', 1):.1f}x avg")
+                tech_reason_parts.append("Price > SMA50 & SMA20")
+                tech_reason_parts.append("MACD bullish")
+                
+                tech_reason = " | ".join(tech_reason_parts)
+                
+                # Final thesis
                 if passed:
-                    fundamental_thesis = ". ".join(fund_thesis_parts) if fund_thesis_parts else "Meets fundamental criteria"
+                    fundamental_thesis = f"✅ All fundamentals pass thresholds. {metrics_summary}. Technical Pick: {tech_reason}"
                 else:
-                    fundamental_thesis = f"Fundamentals outside thresholds: {', '.join(failed_checks)}"
+                    failed_list = ", ".join(failed_checks)
+                    fundamental_thesis = f"⚠️ Technical momentum play (some fundamentals outside thresholds: {failed_list}). {metrics_summary}. Why picked: {tech_reason}"
                 
                 # ALWAYS return stock with fundamentals (whether passed or not)
                 return {
