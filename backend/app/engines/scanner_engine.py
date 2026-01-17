@@ -377,24 +377,25 @@ class MarketScanner:
                 
                 # Fundamental Check Logic (using user thresholds)
                 passed = True
-                reason = "Passed"
+                failed_checks = []
                 
                 if not (rev_growth_min <= info_proxy['revenueGrowth'] <= rev_growth_max):
-                    passed = False; reason = f"Revenue Growth: {info_proxy['revenueGrowth']:.2%} not in {rev_growth_min:.0%}-{rev_growth_max:.0%}"
-                elif not (roe_min <= info_proxy['returnOnEquity'] <= roe_max):
-                    passed = False; reason = f"ROE: {info_proxy['returnOnEquity']:.2%} not in {roe_min:.0%}-{roe_max:.0%}"
-                elif not (roce_min <= info_proxy.get('roce', 0) <= roce_max):
-                    passed = False; reason = f"ROCE: {info_proxy.get('roce', 0):.2%} not in {roce_min:.0%}-{roce_max:.0%}"
-                elif not (profit_growth_min <= info_proxy.get('profitGrowth', 0) <= profit_growth_max):
-                    passed = False; reason = f"Profit Growth: {info_proxy.get('profitGrowth', 0):.2%} not in {profit_growth_min:.0%}-{profit_growth_max:.0%}"
-                elif not (de_min <= info_proxy['debtToEquity'] <= de_max): 
-                    passed = False; reason = f"Debt/Equity: {info_proxy['debtToEquity']:.1f} not in {de_min}-{de_max}"
+                    passed = False; failed_checks.append(f"RevGrowth: {info_proxy['revenueGrowth']:.1%}")
+                if not (roe_min <= info_proxy['returnOnEquity'] <= roe_max):
+                    passed = False; failed_checks.append(f"ROE: {info_proxy['returnOnEquity']:.1%}")
+                if not (roce_min <= info_proxy.get('roce', 0) <= roce_max):
+                    passed = False; failed_checks.append(f"ROCE: {info_proxy.get('roce', 0):.1%}")
+                if not (profit_growth_min <= info_proxy.get('profitGrowth', 0) <= profit_growth_max):
+                    passed = False; failed_checks.append(f"ProfitGrowth: {info_proxy.get('profitGrowth', 0):.1%}")
+                if not (de_min <= info_proxy['debtToEquity'] <= de_max): 
+                    passed = False; failed_checks.append(f"D/E: {info_proxy['debtToEquity']:.1f}")
                 
-                if not passed:
-                    print(f"[FUND] REJECT {ticker}: {reason}", flush=True)
-                    return None
-                
-                print(f"[FUND] PASS {ticker}: All fundamentals in range!", flush=True)
+                if passed:
+                    print(f"[FUND] PASS {ticker}: All fundamentals in range!", flush=True)
+                    thesis = fundamental_thesis
+                else:
+                    print(f"[FUND] PARTIAL {ticker}: Failed checks: {', '.join(failed_checks)}", flush=True)
+                    thesis = f"Technical play - failed: {', '.join(failed_checks)}"
     
                 score_data = self._calculate_upside_score(cand.get('df'), info_proxy, region)
                 
@@ -419,12 +420,16 @@ class MarketScanner:
                 elif info_proxy['debtToEquity'] < 100:
                     fund_thesis_parts.append("Manageable debt")
                 
-                fundamental_thesis = ". ".join(fund_thesis_parts) if fund_thesis_parts else "Meets fundamental criteria"
+                if passed:
+                    fundamental_thesis = ". ".join(fund_thesis_parts) if fund_thesis_parts else "Meets fundamental criteria"
+                else:
+                    fundamental_thesis = f"Fundamentals outside thresholds: {', '.join(failed_checks)}"
                 
+                # ALWAYS return stock with fundamentals (whether passed or not)
                 return {
                     "ticker": ticker,
                     "price": round(cand.get('price', 0), 2),
-                    "score": score_data.get('total_score', 50),
+                    "score": score_data.get('total_score', 50) if passed else 60,  # Lower score if failed
                     "upside_potential": score_data.get('upside_pct', 0),
                     "momentum_score": score_data.get('momentum_score', 50),
                     "rsi": round(cand.get('rsi', 50), 2),
@@ -432,6 +437,7 @@ class MarketScanner:
                     "sector": info_proxy.get('sector', 'Unknown'),
                     "beta": info_proxy.get('beta', 1.0),
                     "fundamental_thesis": fundamental_thesis,
+                    "fundamentals_passed": passed,
                     "fundamentals": {
                         "revenue_growth": round(info_proxy['revenueGrowth'] * 100, 1),
                         "roe": round(info_proxy['returnOnEquity'] * 100, 1),
@@ -448,23 +454,9 @@ class MarketScanner:
             for res in results:
                 if res: final_list.append(res)
                     
-            # Safety Net: If all rejected or failed, return top technical candidates raw
+            # Note: No fallback needed now since we always return stocks with data
             if not final_list and top_candidates:
-                 print("All fundamental checks failed/rejected. Returning top technical plays.")
-                 for cand in top_candidates[:3]:
-                     final_list.append({
-                        "ticker": cand.get('ticker', 'UNKNOWN'),
-                        "price": round(cand.get('price', 0), 2),
-                        "score": 75.0, 
-                        "upside_potential": 15.0,
-                        "momentum_score": 85.0,
-                        "rsi": round(cand.get('rsi', 50), 2),
-                        "vol_shock": round(cand.get('vol_shock', 1), 2),
-                        "sector": "Technicals Only",
-                        "beta": 1.0,
-                        "fundamental_thesis": "Technical momentum play - fundamentals not verified",
-                        "fundamentals": None
-                    })
+                 print("No candidates processed. Check for errors.", flush=True)
     
             # 6. Final Sort & Cache
             final_list.sort(key=lambda x: x.get('score', 0), reverse=True)
