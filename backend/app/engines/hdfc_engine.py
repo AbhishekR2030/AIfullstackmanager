@@ -317,28 +317,179 @@ class HDFCEngine:
                 data["quantity"] = int(data["quantity"])
                 if data["quantity"] > 0: # Double check
                     final_holdings.append(data)
+            
+            # --- STEP 2: Enrich with Trade Book data for accurate purchase dates ---
+            trade_dates = self._fetch_tradebook_dates()
+            if trade_dates:
+                for holding in final_holdings:
+                    ticker = holding.get("ticker", "")
+                    isin = holding.get("isin", "")
+                    
+                    # Try to match by ticker or ISIN
+                    matched_date = None
+                    ticker_base = ticker.replace(".NS", "").replace(".BO", "")
+                    
+                    if ticker_base in trade_dates:
+                        matched_date = trade_dates[ticker_base]
+                    elif isin in trade_dates:
+                        matched_date = trade_dates[isin]
+                    
+                    if matched_date:
+                        holding["buy_date"] = matched_date
+                        print(f"Matched trade date for {ticker}: {matched_date}")
                 
             return final_holdings
 
         except Exception as e:
             print(f"HDFC Engine Exception: {e}")
+            import traceback
+            traceback.print_exc()
             return {"error": str(e)}
 
+    def _fetch_tradebook_dates(self):
+        """
+        Fetches trade book from HDFC API to get actual purchase dates.
+        Returns a dict mapping security_id/isin to the earliest fill_timestamp.
+        """
+        if not self.api_key or not self.access_token:
+            print("Trade Book: Skipping - no credentials")
+            return {}
+        
+        try:
+            url = f"{self.base_url}/trades"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "x-api-key": self.api_key,
+                "Accept": "application/json"
+            }
+            params = {"api_key": self.api_key}
+            
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            if response.status_code != 200:
+                print(f"Trade Book API Error: {response.status_code}")
+                return {}
+            
+            data = response.json()
+            
+            # DEBUG: Log trade book response
+            print("="*60)
+            print("HDFC TRADE BOOK RESPONSE:")
+            print("="*60)
+            import json as json_module
+            print(json_module.dumps(data, indent=2)[:1500])
+            if isinstance(data.get("data"), list) and len(data["data"]) > 0:
+                print("\nTRADE BOOK FIRST ITEM KEYS:")
+                print(list(data["data"][0].keys()))
+            print("="*60)
+            
+            trades_list = data.get("data", [])
+            if isinstance(data, list):
+                trades_list = data
+            
+            # Build a map of security -> earliest trade date
+            trade_dates = {}
+            
+            for trade in trades_list:
+                # Try multiple possible security identifier fields
+                security_id = (
+                    trade.get("security_id") or 
+                    trade.get("trading_symbol") or 
+                    trade.get("symbol") or 
+                    trade.get("scrip_nm") or
+                    ""
+                ).strip().upper().replace("-EQ", "")
+                
+                isin = trade.get("isin", "").strip()
+                
+                # Get timestamp - try multiple fields
+                timestamp = (
+                    trade.get("fill_timestamp") or 
+                    trade.get("order_timestamp") or 
+                    trade.get("trade_date") or
+                    trade.get("fill_date") or
+                    ""
+                )
+                
+                if not timestamp:
+                    continue
+                
+                # Parse timestamp to date string (YYYY-MM-DD)
+                date_str = None
+                try:
+                    # Handle different timestamp formats
+                    if "T" in timestamp:
+                        # ISO format: 2023-05-15T10:30:00
+                        date_str = timestamp.split("T")[0]
+                    elif " " in timestamp:
+                        # Date time format: 2023-05-15 10:30:00
+                        date_str = timestamp.split(" ")[0]
+                    else:
+                        # Assume it's already a date
+                        date_str = timestamp
+                except:
+                    continue
+                
+                if not date_str:
+                    continue
+                
+                # Store the EARLIEST date for each security
+                if security_id and security_id not in trade_dates:
+                    trade_dates[security_id] = date_str
+                elif security_id and date_str < trade_dates.get(security_id, "9999-99-99"):
+                    trade_dates[security_id] = date_str
+                
+                if isin and isin not in trade_dates:
+                    trade_dates[isin] = date_str
+                elif isin and date_str < trade_dates.get(isin, "9999-99-99"):
+                    trade_dates[isin] = date_str
+            
+            print(f"Trade Book: Found dates for {len(trade_dates)} securities")
+            return trade_dates
+            
+        except Exception as e:
+            print(f"Trade Book Exception: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+
     def _get_mock_holdings(self):
-        """Returns mock data for testing."""
+        """Returns mock data for testing with realistic historical dates."""
+        from datetime import timedelta
+        today = datetime.now()
+        
         return [
             {
                 "ticker": "TCS.NS",
+                "company_name": "Tata Consultancy Services",
                 "quantity": 10,
                 "buy_price": 3500.0,
-                "buy_date": "2023-05-15",
+                "buy_date": (today - timedelta(days=180)).strftime("%Y-%m-%d"),
                 "source": "HDFC"
             },
             {
                 "ticker": "INFY.NS",
+                "company_name": "Infosys Limited",
                 "quantity": 25,
                 "buy_price": 1450.0,
-                "buy_date": "2023-06-20",
+                "buy_date": (today - timedelta(days=120)).strftime("%Y-%m-%d"),
+                "source": "HDFC"
+            },
+            {
+                "ticker": "RELIANCE.NS",
+                "company_name": "Reliance Industries",
+                "quantity": 5,
+                "buy_price": 2600.0,
+                "buy_date": (today - timedelta(days=90)).strftime("%Y-%m-%d"),
+                "source": "HDFC"
+            },
+            {
+                "ticker": "HDFCBANK.NS",
+                "company_name": "HDFC Bank",
+                "quantity": 15,
+                "buy_price": 1580.0,
+                "buy_date": (today - timedelta(days=60)).strftime("%Y-%m-%d"),
                 "source": "HDFC"
             }
         ]
+
