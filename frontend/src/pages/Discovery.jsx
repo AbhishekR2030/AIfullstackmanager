@@ -5,11 +5,21 @@ import ThresholdsModal, { DEFAULT_THRESHOLDS } from '../components/ThresholdsMod
 import { RefreshCw, ArrowRight, TrendingUp, AlertTriangle, CheckCircle, Settings } from 'lucide-react';
 import './Discovery.css';
 
-// localStorage key for persistent thresholds
+// localStorage keys for persistent data
 const THRESHOLDS_STORAGE_KEY = 'alphaseeker_discovery_thresholds';
+const SCAN_RESULTS_STORAGE_KEY = 'alphaseeker_discovery_results';
 
 const Discovery = () => {
-    const [scanData, setScanData] = useState(null);
+    // Load scan results from localStorage on mount
+    const [scanData, setScanData] = useState(() => {
+        try {
+            const saved = localStorage.getItem(SCAN_RESULTS_STORAGE_KEY);
+            return saved ? JSON.parse(saved) : null;
+        } catch {
+            return null;
+        }
+    });
+
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [showThresholds, setShowThresholds] = useState(false);
@@ -30,6 +40,8 @@ const Discovery = () => {
             setError(null);
             const data = await fetchDiscoveryScan(customThresholds);
             setScanData(data);
+            // Persist scan results to localStorage
+            localStorage.setItem(SCAN_RESULTS_STORAGE_KEY, JSON.stringify(data));
         } catch (err) {
             console.error("Scan error:", err);
             setError("Failed to scan market. Server might be busy.");
@@ -40,7 +52,7 @@ const Discovery = () => {
 
     const handleApplyThresholds = (newThresholds) => {
         setThresholds(newThresholds);
-        // Persist to localStorage
+        // Persist thresholds to localStorage
         localStorage.setItem(THRESHOLDS_STORAGE_KEY, JSON.stringify(newThresholds));
         loadData(newThresholds);
     };
@@ -145,7 +157,7 @@ const Discovery = () => {
                                             {(asset.recommendation || '').replace('_', ' ')}
                                         </div>
                                         <div className="health-details">
-                                            Age: {asset.age_days}d | Trend: {asset.trend}
+                                            Age: {asset.age_days || 0}d | Trend: {asset.trend}
                                         </div>
                                     </div>
                                 ))}
