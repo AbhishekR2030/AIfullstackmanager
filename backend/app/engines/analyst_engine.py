@@ -2,6 +2,7 @@ import yfinance as yf
 import os
 import google.generativeai as genai
 import json
+import time
 from datetime import datetime, timedelta
 
 class AnalystEngine:
@@ -12,17 +13,17 @@ class AnalystEngine:
         else:
             print("Warning: GOOGLE_API_KEY not found in environment variables.")
 
-        # Priority List: Try powerful models first, fallback to reliable/fast ones
-        # Priority List: Try powerful models first, fallback to reliable/fast ones
-        # Priority List: Try powerful models first, fallback to reliable/fast ones
+        # Model Tier List (from user's Google AI Studio - Jan 2026)
+        # Ordered by preference, will fallback on 429 rate limit errors
         self.models = [
-            'models/gemini-2.0-flash-001',  # 1. User Selected
-            'models/gemini-2.0-flash',      # 2. Alternates
-            'models/gemini-flash-latest',   # 3. Fallback (Flash 1.5)
-            'models/gemini-pro-latest',     # 4. Fallback (Pro 1.5)
+            'models/gemini-2.5-flash',       # 1. Primary (5 RPM, 20 RPD)
+            'models/gemini-2.5-flash-lite',  # 2. Fallback (10 RPM, 20 RPD) - higher rate limit
+            'models/gemini-3-flash',         # 3. Fallback (5 RPM, 20 RPD)
+            'models/gemini-2.0-flash',       # 4. Legacy fallback
         ]
-
-    # ... (fetch_market_data, fetch_news, get_macro_data remain same)
+        
+        # Track rate-limited models to skip them temporarily
+        self.rate_limited_models = {}  # {model_name: expire_time}
 
     def generate_thesis(self, ticker_symbol):
         if not self.api_key:
@@ -55,10 +56,22 @@ class AnalystEngine:
         """
 
         last_error = None
+        current_time = time.time()
 
-        # Smart Tiering Strategy
+        # Clean up expired rate limits
+        self.rate_limited_models = {
+            k: v for k, v in self.rate_limited_models.items() 
+            if v > current_time
+        }
+
+        # Smart Tiering Strategy with Rate Limit Handling
         for model_name in self.models:
-            print(f"Trying AI Model: {model_name}...")
+            # Skip temporarily rate-limited models
+            if model_name in self.rate_limited_models:
+                print(f"[AI] Skipping {model_name} (rate limited until {self.rate_limited_models[model_name] - current_time:.0f}s)", flush=True)
+                continue
+                
+            print(f"[AI] Trying Model: {model_name}...", flush=True)
             try:
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(prompt)
@@ -69,12 +82,21 @@ class AnalystEngine:
                 
                 # If successful, inject the model name used for transparency
                 result['model_used'] = model_name 
+                print(f"[AI] Success with {model_name}", flush=True)
                 return result
 
             except Exception as e:
-                print(f"Failed with {model_name}: {e}")
+                error_str = str(e)
+                print(f"[AI] Failed with {model_name}: {error_str[:100]}", flush=True)
                 last_error = e
-                continue # Try next model
+                
+                # Check for rate limit error (429)
+                if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower():
+                    # Mark model as rate limited for 60 seconds
+                    self.rate_limited_models[model_name] = current_time + 60
+                    print(f"[AI] Rate limited: {model_name} - trying next model", flush=True)
+                
+                continue  # Try next model
         
         # If all failed
         return {"error": f"All AI tiers failed. Last error: {str(last_error)}"}
