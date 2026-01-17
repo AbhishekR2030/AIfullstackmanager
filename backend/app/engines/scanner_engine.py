@@ -139,19 +139,19 @@ class MarketScanner:
             return ticker, {}
 
 
-    def _fetch_fmp_fundamentals(self, ticker, region="IN"):
+    def _fetch_yahoo_fundamentals(self, ticker, region="IN"):
         """
-        Fetches fundamental data using Financial Modeling Prep (FMP) API.
-        Much more reliable than Perplexity for structured data.
+        Fetches fundamental data using Yahoo Finance (FREE).
+        Much more reliable for Indian stocks than FMP.
         """
         try:
-            from app.engines.fmp_engine import fmp_engine
-            return fmp_engine.get_fundamentals(ticker)
+            from app.engines.yahoo_fundamentals_engine import yahoo_fundamentals
+            return yahoo_fundamentals.get_fundamentals(ticker)
         except ImportError:
-            print("[Scanner] FMP Engine not available, using fallback", flush=True)
+            print("[Scanner] Yahoo Fundamentals Engine not available, using fallback", flush=True)
             return {}
         except Exception as e:
-            print(f"[Scanner] FMP Error for {ticker}: {e}", flush=True)
+            print(f"[Scanner] Yahoo Finance Error for {ticker}: {e}", flush=True)
             return {}
     
     # Keep Perplexity as fallback (renamed)
@@ -320,8 +320,8 @@ class MarketScanner:
                  if self.cache: return self.cache
                  return []
             
-            # 5. Fetch Fundamentals via FMP API (Parallel with Fallback)
-            print("Fetching fundamentals via FMP API...")
+            # 5. Fetch Fundamentals via Yahoo Finance (FREE - no API key needed)
+            print("Fetching fundamentals via Yahoo Finance...")
             final_list = []
             
             # Helper to fetch and process single candidate
@@ -329,10 +329,10 @@ class MarketScanner:
                 ticker = cand.get('ticker', 'UNKNOWN')
                 print(f"Analyzing Fundamentals: {ticker}")
                 
-                # Fetch Data from FMP (primary) or Perplexity (fallback)
-                p_data = self._fetch_fmp_fundamentals(ticker, region)
-                if not p_data or p_data.get("source") != "FMP":
-                    # Fallback to Perplexity if FMP fails
+                # Fetch Data from Yahoo Finance (primary)
+                p_data = self._fetch_yahoo_fundamentals(ticker, region)
+                if not p_data or p_data.get("source") != "YahooFinance":
+                    # Fallback to Perplexity if Yahoo fails
                     p_data = self._fetch_perplexity_fundamentals_legacy(ticker, region)
                 
                 # Helper: Safe Float
