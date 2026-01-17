@@ -138,9 +138,27 @@ class MarketScanner:
         except:
             return ticker, {}
 
-    def _fetch_perplexity_fundamentals(self, ticker, region="IN"):
+
+    def _fetch_fmp_fundamentals(self, ticker, region="IN"):
         """
-        Fetches fundamental data using Perplexity API (Sonar-Pro/Reasoning).
+        Fetches fundamental data using Financial Modeling Prep (FMP) API.
+        Much more reliable than Perplexity for structured data.
+        """
+        try:
+            from app.engines.fmp_engine import fmp_engine
+            return fmp_engine.get_fundamentals(ticker)
+        except ImportError:
+            print("[Scanner] FMP Engine not available, using fallback", flush=True)
+            return {}
+        except Exception as e:
+            print(f"[Scanner] FMP Error for {ticker}: {e}", flush=True)
+            return {}
+    
+    # Keep Perplexity as fallback (renamed)
+    def _fetch_perplexity_fundamentals_legacy(self, ticker, region="IN"):
+        """
+        Legacy: Fetches fundamental data using Perplexity API.
+        Kept as fallback if FMP fails.
         """
         api_key = os.getenv("PERPLEXITY_API_KEY")
         if not api_key:
@@ -168,7 +186,7 @@ class MarketScanner:
         }
         
         payload = {
-            "model": "sonar", # Switched to faster model to prevent timeouts
+            "model": "sonar",
             "messages": [
                 {"role": "system", "content": "You are a financial data assistant. Return ONLY JSON. No markdown formatting."},
                 {"role": "user", "content": prompt}
@@ -176,7 +194,6 @@ class MarketScanner:
         }
         
         try:
-            # Increased timeout to 30s to handle API latency
             response = requests.post("https://api.perplexity.ai/chat/completions", json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
                 content = response.json()['choices'][0]['message']['content']
@@ -192,6 +209,7 @@ class MarketScanner:
         except Exception as e:
             print(f"Perplexity Exception for {ticker}: {e}")
             return {}
+
 
     def scan_market(self, region="IN", thresholds=None):
         """
@@ -302,8 +320,8 @@ class MarketScanner:
                  if self.cache: return self.cache
                  return []
             
-            # 5. Fetch Fundamentals via Perplexity (Parallel with Fallback)
-            print("Fetching fundamentals via Perplexity API...")
+            # 5. Fetch Fundamentals via FMP API (Parallel with Fallback)
+            print("Fetching fundamentals via FMP API...")
             final_list = []
             
             # Helper to fetch and process single candidate
@@ -311,8 +329,11 @@ class MarketScanner:
                 ticker = cand.get('ticker', 'UNKNOWN')
                 print(f"Analyzing Fundamentals: {ticker}")
                 
-                # Fetch Data
-                p_data = self._fetch_perplexity_fundamentals(ticker, region)
+                # Fetch Data from FMP (primary) or Perplexity (fallback)
+                p_data = self._fetch_fmp_fundamentals(ticker, region)
+                if not p_data or p_data.get("source") != "FMP":
+                    # Fallback to Perplexity if FMP fails
+                    p_data = self._fetch_perplexity_fundamentals_legacy(ticker, region)
                 
                 # Helper: Safe Float
                 def safe_float(val, default=0.0):
