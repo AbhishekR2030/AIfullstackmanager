@@ -368,7 +368,20 @@ class HDFCEngine:
                 "x-api-key": self.api_key,
                 "Accept": "application/json"
             }
-            params = {"api_key": self.api_key}
+            
+            # Add date range to get historical trades (last 2 years)
+            from datetime import timedelta
+            today = datetime.now()
+            from_date = (today - timedelta(days=730)).strftime("%Y-%m-%d")  # 2 years ago
+            to_date = today.strftime("%Y-%m-%d")
+            
+            params = {
+                "api_key": self.api_key,
+                "from_date": from_date,
+                "to_date": to_date,
+                "segment": "EQ"  # Equity segment
+            }
+            print(f"[TRADE_BOOK] Params: from_date={from_date}, to_date={to_date}", flush=True)
             
             response = requests.get(url, headers=headers, params=params, timeout=15)
             print(f"[TRADE_BOOK] Response status: {response.status_code}", flush=True)
