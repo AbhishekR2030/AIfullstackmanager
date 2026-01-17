@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Settings, X, RotateCcw } from 'lucide-react';
 import './ThresholdsModal.css';
 
@@ -28,16 +28,40 @@ const DEFAULT_THRESHOLDS = {
 const ThresholdsModal = ({ isOpen, onClose, onApply, initialThresholds }) => {
     const [thresholds, setThresholds] = useState(initialThresholds || DEFAULT_THRESHOLDS);
 
+    // Sync with initialThresholds when modal opens
+    useEffect(() => {
+        if (isOpen && initialThresholds) {
+            setThresholds(initialThresholds);
+        }
+    }, [isOpen, initialThresholds]);
+
     if (!isOpen) return null;
 
     const handleChange = (section, field, value) => {
+        // Allow empty string for easier editing, parse on blur
+        const numValue = value === '' ? '' : parseFloat(value);
         setThresholds(prev => ({
             ...prev,
             [section]: {
                 ...prev[section],
-                [field]: parseFloat(value) || 0
+                [field]: numValue
             }
         }));
+    };
+
+    const handleBlur = (section, field) => {
+        // Ensure valid number on blur
+        const val = thresholds[section][field];
+        if (val === '' || isNaN(val)) {
+            const defaultVal = DEFAULT_THRESHOLDS[section][field];
+            setThresholds(prev => ({
+                ...prev,
+                [section]: {
+                    ...prev[section],
+                    [field]: defaultVal
+                }
+            }));
+        }
     };
 
     const handleReset = () => {
@@ -45,7 +69,20 @@ const ThresholdsModal = ({ isOpen, onClose, onApply, initialThresholds }) => {
     };
 
     const handleApply = () => {
-        onApply(thresholds);
+        // Ensure all values are numbers before applying
+        const cleanThresholds = {
+            technical: {},
+            fundamental: {}
+        };
+
+        for (const [key, val] of Object.entries(thresholds.technical)) {
+            cleanThresholds.technical[key] = parseFloat(val) || DEFAULT_THRESHOLDS.technical[key];
+        }
+        for (const [key, val] of Object.entries(thresholds.fundamental)) {
+            cleanThresholds.fundamental[key] = parseFloat(val) || DEFAULT_THRESHOLDS.fundamental[key];
+        }
+
+        onApply(cleanThresholds);
         onClose();
     };
 
@@ -54,18 +91,22 @@ const ThresholdsModal = ({ isOpen, onClose, onApply, initialThresholds }) => {
             <label className="threshold-label">{label} {unit && `(${unit})`}</label>
             <div className="threshold-inputs">
                 <input
-                    type="number"
-                    step="0.1"
+                    type="text"
+                    inputMode="decimal"
+                    pattern="[0-9]*\.?[0-9]*"
                     value={thresholds[section][minField]}
                     onChange={(e) => handleChange(section, minField, e.target.value)}
+                    onBlur={() => handleBlur(section, minField)}
                     placeholder="Min"
                 />
                 <span className="range-separator">to</span>
                 <input
-                    type="number"
-                    step="0.1"
+                    type="text"
+                    inputMode="decimal"
+                    pattern="[0-9]*\.?[0-9]*"
                     value={thresholds[section][maxField]}
                     onChange={(e) => handleChange(section, maxField, e.target.value)}
+                    onBlur={() => handleBlur(section, maxField)}
                     placeholder="Max"
                 />
             </div>

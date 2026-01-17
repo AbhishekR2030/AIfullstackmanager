@@ -365,6 +365,29 @@ class MarketScanner:
     
                 score_data = self._calculate_upside_score(cand.get('df'), info_proxy, region)
                 
+                # Build fundamental thesis summary
+                fund_thesis_parts = []
+                if info_proxy['revenueGrowth'] > 0.15:
+                    fund_thesis_parts.append(f"Strong revenue growth ({info_proxy['revenueGrowth']*100:.1f}%)")
+                elif info_proxy['revenueGrowth'] > 0:
+                    fund_thesis_parts.append(f"Positive revenue growth ({info_proxy['revenueGrowth']*100:.1f}%)")
+                    
+                if info_proxy['returnOnEquity'] > 0.15:
+                    fund_thesis_parts.append(f"High ROE ({info_proxy['returnOnEquity']*100:.1f}%)")
+                    
+                if info_proxy.get('roce', 0) > 0.15:
+                    fund_thesis_parts.append(f"Strong ROCE ({info_proxy.get('roce', 0)*100:.1f}%)")
+                    
+                if info_proxy.get('profitGrowth', 0) > 0.10:
+                    fund_thesis_parts.append(f"Profit growth ({info_proxy.get('profitGrowth', 0)*100:.1f}%)")
+                    
+                if info_proxy['debtToEquity'] < 50:
+                    fund_thesis_parts.append("Low debt")
+                elif info_proxy['debtToEquity'] < 100:
+                    fund_thesis_parts.append("Manageable debt")
+                
+                fundamental_thesis = ". ".join(fund_thesis_parts) if fund_thesis_parts else "Meets fundamental criteria"
+                
                 return {
                     "ticker": ticker,
                     "price": round(cand.get('price', 0), 2),
@@ -374,7 +397,15 @@ class MarketScanner:
                     "rsi": round(cand.get('rsi', 50), 2),
                     "vol_shock": round(cand.get('vol_shock', 1), 2),
                     "sector": info_proxy.get('sector', 'Unknown'),
-                    "beta": info_proxy.get('beta', 1.0)
+                    "beta": info_proxy.get('beta', 1.0),
+                    "fundamental_thesis": fundamental_thesis,
+                    "fundamentals": {
+                        "revenue_growth": round(info_proxy['revenueGrowth'] * 100, 1),
+                        "roe": round(info_proxy['returnOnEquity'] * 100, 1),
+                        "roce": round(info_proxy.get('roce', 0) * 100, 1),
+                        "profit_growth": round(info_proxy.get('profitGrowth', 0) * 100, 1),
+                        "debt_equity": round(info_proxy['debtToEquity'], 1)
+                    }
                 }
     
             # Run Parallel
@@ -397,7 +428,9 @@ class MarketScanner:
                         "rsi": round(cand.get('rsi', 50), 2),
                         "vol_shock": round(cand.get('vol_shock', 1), 2),
                         "sector": "Technicals Only",
-                        "beta": 1.0
+                        "beta": 1.0,
+                        "fundamental_thesis": "Technical momentum play - fundamentals not verified",
+                        "fundamentals": None
                     })
     
             # 6. Final Sort & Cache

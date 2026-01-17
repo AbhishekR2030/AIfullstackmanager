@@ -175,17 +175,20 @@ class HDFCEngine:
                 "INE030A01027": "HINDUNILVR.NS",
                 "INF204KC1402": "SILVERBEES.NS",
                 "INF204KB1715": "GOLDBEES.NS",
-                "INF204KB17I5": "GOLDBEES.NS", # Handling potential typo/OCR issue from source
+                "INF204KB17I5": "GOLDBEES.NS",
                 "INE0LXG01040": "OLAELEC.NS",
                 "INE00H001014": "SWIGGY.NS",
                 "INE483C01032": "TANLA.NS",
                 "INE144Z01023": "TARSONS.NS",
                 "INE670A01012": "TATAELXSI.NS",
                 "INE251B01027": "ZENTEC.NS",
-                "INE144Z01023": "TARSONS.NS",
-                "INE670A01012": "TATAELXSI.NS",
-                "INE251B01027": "ZENTEC.NS"
-                # Removed LIQUIDBEES as user requested to filter it out ("Fund")
+                "INE263A01024": "BEL.NS",      # Bharat Electronics
+                "INE002A01018": "RELIANCE.NS",
+                "INE467B01029": "TCS.NS",
+                "INE009A01021": "INFY.NS",
+                "INE090A01021": "ICICIBANK.NS",
+                "INE062A01020": "SBIN.NS",
+                "INE040A01034": "HDFCBANK.NS",
             }
 
             for item in portfolio_list:

@@ -1,9 +1,9 @@
 import React from 'react';
-import { ArrowUpRight, Activity } from 'lucide-react';
+import { ArrowUpRight, Activity, TrendingUp } from 'lucide-react';
 import './StockCard.css';
 
 const StockCard = ({ stock, onClick }) => {
-    const [showThesis, setShowThesis] = React.useState(false);
+    const [showDetails, setShowDetails] = React.useState(false);
 
     return (
         <div className="card stock-card">
@@ -39,18 +39,60 @@ const StockCard = ({ stock, onClick }) => {
                 </div>
             </div>
 
-            {/* Thesis Section (Only if available) */}
-            {stock.thesis && stock.thesis.length > 0 && (
+            {/* Fundamental Thesis Section */}
+            {stock.fundamental_thesis && (
+                <div className="thesis-section mt-3 pt-2 border-top">
+                    <div
+                        className="thesis-header cursor-pointer"
+                        onClick={() => setShowDetails(!showDetails)}
+                    >
+                        <span className="thesis-label">
+                            <TrendingUp size={14} /> Why Buy?
+                        </span>
+                        <ArrowUpRight size={14} className={`arrow ${showDetails ? 'rotate' : ''}`} />
+                    </div>
+
+                    <p className="thesis-text">{stock.fundamental_thesis}</p>
+
+                    {showDetails && stock.fundamentals && (
+                        <div className="fundamentals-grid">
+                            <div className="fund-item">
+                                <span className="fund-label">Rev Growth</span>
+                                <span className="fund-value">{stock.fundamentals.revenue_growth}%</span>
+                            </div>
+                            <div className="fund-item">
+                                <span className="fund-label">Profit Growth</span>
+                                <span className="fund-value">{stock.fundamentals.profit_growth}%</span>
+                            </div>
+                            <div className="fund-item">
+                                <span className="fund-label">ROE</span>
+                                <span className="fund-value">{stock.fundamentals.roe}%</span>
+                            </div>
+                            <div className="fund-item">
+                                <span className="fund-label">ROCE</span>
+                                <span className="fund-value">{stock.fundamentals.roce}%</span>
+                            </div>
+                            <div className="fund-item">
+                                <span className="fund-label">D/E</span>
+                                <span className="fund-value">{stock.fundamentals.debt_equity}%</span>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* Legacy thesis support */}
+            {stock.thesis && stock.thesis.length > 0 && !stock.fundamental_thesis && (
                 <div className="thesis-preview mt-3 pt-2 border-top">
                     <div
                         className="d-flex justify-content-between align-items-center cursor-pointer"
-                        onClick={() => setShowThesis(!showThesis)}
+                        onClick={() => setShowDetails(!showDetails)}
                     >
-                        <span className="text-xs font-bold text-info">Why Buy?</span>
-                        <ArrowUpRight size={14} className={`transform transition ${showThesis ? 'rotate-180' : ''}`} />
+                        <span className="text-xs font-bold text-info">AI Thesis</span>
+                        <ArrowUpRight size={14} className={`transform transition ${showDetails ? 'rotate-180' : ''}`} />
                     </div>
 
-                    {showThesis ? (
+                    {showDetails ? (
                         <ul className="text-xs text-muted pl-4 mt-2 mb-0">
                             {stock.thesis.map((pt, i) => <li key={i}>{pt}</li>)}
                         </ul>

@@ -5,15 +5,24 @@ import ThresholdsModal, { DEFAULT_THRESHOLDS } from '../components/ThresholdsMod
 import { RefreshCw, ArrowRight, TrendingUp, AlertTriangle, CheckCircle, Settings } from 'lucide-react';
 import './Discovery.css';
 
+// localStorage key for persistent thresholds
+const THRESHOLDS_STORAGE_KEY = 'alphaseeker_discovery_thresholds';
+
 const Discovery = () => {
     const [scanData, setScanData] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [showThresholds, setShowThresholds] = useState(false);
-    const [thresholds, setThresholds] = useState(DEFAULT_THRESHOLDS);
 
-    // Don't auto-load on mount - wait for user to set thresholds or click scan
-    // useEffect(() => { loadData(); }, []);
+    // Load thresholds from localStorage on mount
+    const [thresholds, setThresholds] = useState(() => {
+        try {
+            const saved = localStorage.getItem(THRESHOLDS_STORAGE_KEY);
+            return saved ? JSON.parse(saved) : DEFAULT_THRESHOLDS;
+        } catch {
+            return DEFAULT_THRESHOLDS;
+        }
+    });
 
     const loadData = async (customThresholds = thresholds) => {
         try {
@@ -31,6 +40,8 @@ const Discovery = () => {
 
     const handleApplyThresholds = (newThresholds) => {
         setThresholds(newThresholds);
+        // Persist to localStorage
+        localStorage.setItem(THRESHOLDS_STORAGE_KEY, JSON.stringify(newThresholds));
         loadData(newThresholds);
     };
 
@@ -85,7 +96,7 @@ const Discovery = () => {
             ) : (
                 <div className="scan-results-container">
 
-                    {/* 1. Swap Opportunities (High Priority) */}
+                    {/* 1. Swap Opportunities (High Priority) with Ranking */}
                     {scanData.swap_opportunities && scanData.swap_opportunities.length > 0 && (
                         <div className="section-card highlight-section">
                             <h3 className="section-title"><AlertTriangle size={20} color="#f59e0b" /> Recommendation: Sell & Reinvest</h3>
@@ -128,10 +139,10 @@ const Discovery = () => {
                             <h3 className="section-title"><CheckCircle size={20} color="#3b82f6" /> Portfolio Health Check</h3>
                             <div className="portfolio-health-list">
                                 {scanData.portfolio_analysis.map((asset, idx) => (
-                                    <div key={idx} className={`health-item ${asset.recommendation.toLowerCase()}`}>
+                                    <div key={idx} className={`health-item ${(asset.recommendation || '').toLowerCase()}`}>
                                         <div className="health-ticker">{asset.ticker}</div>
                                         <div className="health-badge">
-                                            {asset.recommendation.replace('_', ' ')}
+                                            {(asset.recommendation || '').replace('_', ' ')}
                                         </div>
                                         <div className="health-details">
                                             Age: {asset.age_days}d | Trend: {asset.trend}
