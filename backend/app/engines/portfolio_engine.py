@@ -63,34 +63,61 @@ class PortfolioEngine:
 
     def sync_hdfc_trades(self, hdfc_trades, user_email):
         """
-        Replaces ALL existing HDFC trades with the fresh batch.
-        This ensures the portfolio is always up-to-date with HDFC.
+        Updates portfolio with fresh data from HDFC.
+        PRESERVES existing buy_dates for stocks already in DB.
+        Only uses HDFC-provided date or default for new stocks.
         """
         db = self._get_db()
         try:
-            # Delete existing HDFC trades for this user
+            # STEP 1: Get existing buy_dates before updating
+            existing_items = db.query(PortfolioItem).filter(
+                PortfolioItem.user_email == user_email,
+                PortfolioItem.source == "HDFC"
+            ).all()
+            
+            # Build a map of ticker -> existing buy_date
+            existing_dates = {}
+            for item in existing_items:
+                if item.buy_date and item.ticker:
+                    existing_dates[item.ticker] = item.buy_date
+            
+            print(f"[SYNC] Preserved dates for {len(existing_dates)} existing stocks", flush=True)
+            
+            # STEP 2: Delete existing HDFC trades
             db.query(PortfolioItem).filter(
                 PortfolioItem.user_email == user_email,
                 PortfolioItem.source == "HDFC"
             ).delete()
             
-            # Add new trades
+            # STEP 3: Add new trades, preserving existing dates
             for trade in hdfc_trades:
+                ticker = trade.get('ticker', '')
+                
+                # Use existing date if available, otherwise use HDFC date or default
+                buy_date = existing_dates.get(ticker)
+                if not buy_date:
+                    # New stock - use what HDFC provided (or default)
+                    buy_date = trade.get('buy_date', datetime.now().strftime("%Y-%m-%d"))
+                    print(f"[SYNC] New stock {ticker}: using date {buy_date}", flush=True)
+                else:
+                    print(f"[SYNC] Existing stock {ticker}: preserved date {buy_date}", flush=True)
+                
                 item = PortfolioItem(
                     user_email=user_email,
-                    ticker=trade.get('ticker'),
+                    ticker=ticker,
                     company_name=trade.get('company_name', ''),
                     quantity=int(trade.get('quantity', 0)),
                     buy_price=float(trade.get('buy_price', 0)),
-                    buy_date=trade.get('buy_date', datetime.now().strftime("%Y-%m-%d")),
+                    buy_date=buy_date,
                     source="HDFC"
                 )
                 db.add(item)
             
             db.commit()
             return {
-                "message": "Portfolio fully synced with HDFC", 
+                "message": "Portfolio synced with HDFC (buy dates preserved)", 
                 "added_count": len(hdfc_trades),
+                "preserved_dates": len(existing_dates),
                 "total_count": len(hdfc_trades)
             }
         finally:
