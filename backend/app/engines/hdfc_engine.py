@@ -155,6 +155,18 @@ class HDFCEngine:
                 return {"error": f"Failed to fetch holdings: {response.status_code}"}
 
             data = response.json()
+            
+            # DEBUG: Log the raw response to understand available fields
+            print("="*60)
+            print("HDFC RAW API RESPONSE:")
+            print("="*60)
+            import json as json_module
+            print(json_module.dumps(data, indent=2)[:2000])  # First 2000 chars
+            if isinstance(data.get("data"), list) and len(data["data"]) > 0:
+                print("\nFIRST ITEM ALL KEYS:")
+                print(list(data["data"][0].keys()))
+            print("="*60)
+            
             # Parse data
             # Structure observed in logs:
             # { "status": "success", "data": [ { "security_id": "TARSONSEQ", "isin": "...", ... } ] }
