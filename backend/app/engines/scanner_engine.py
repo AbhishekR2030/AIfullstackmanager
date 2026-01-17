@@ -349,11 +349,12 @@ class MarketScanner:
                 default_roe = 0.20 if not p_data else 0.0
                 
                 # Construct Info Object for Scoring
+                # FIXED: use correct field names from yahoo_fundamentals_engine
                 rev_growth = safe_float(p_data.get('revenue_growth_yoy'), default_growth)
                 roe = safe_float(p_data.get('return_on_equity'), default_roe)
-                roce = safe_float(p_data.get('roce'), default_roe)
-                profit_growth = safe_float(p_data.get('profit_growth'), default_growth)
-                dte = safe_float(p_data.get('debt_to_equity'), 0.5) * 100 
+                roce = safe_float(p_data.get('return_on_capital_employed'), default_roe)  # FIXED field name
+                profit_growth = safe_float(p_data.get('profit_growth_yoy'), default_growth)  # FIXED field name
+                dte = safe_float(p_data.get('debt_to_equity'), 50)  # Already in percentage for Indian stocks
                 
                 info_proxy = {
                     'quoteType': 'EQUITY', 
@@ -367,24 +368,33 @@ class MarketScanner:
                     'targetMeanPrice': cand.get('price', 0) * 1.2 
                 }
                 
+                # Log actual vs threshold for debugging
+                print(f"[FUND] {ticker}: RevGrowth={rev_growth:.2%} (threshold: {rev_growth_min:.0%}-{rev_growth_max:.0%})", flush=True)
+                print(f"[FUND] {ticker}: ROE={roe:.2%} (threshold: {roe_min:.0%}-{roe_max:.0%})", flush=True)
+                print(f"[FUND] {ticker}: ROCE={roce:.2%} (threshold: {roce_min:.0%}-{roce_max:.0%})", flush=True)
+                print(f"[FUND] {ticker}: ProfitGrowth={profit_growth:.2%} (threshold: {profit_growth_min:.0%}-{profit_growth_max:.0%})", flush=True)
+                print(f"[FUND] {ticker}: D/E={dte:.1f} (threshold: {de_min}-{de_max})", flush=True)
+                
                 # Fundamental Check Logic (using user thresholds)
                 passed = True
                 reason = "Passed"
                 
                 if not (rev_growth_min <= info_proxy['revenueGrowth'] <= rev_growth_max):
-                    passed = False; reason = f"Revenue Growth: {info_proxy['revenueGrowth']:.2f} not in range"
+                    passed = False; reason = f"Revenue Growth: {info_proxy['revenueGrowth']:.2%} not in {rev_growth_min:.0%}-{rev_growth_max:.0%}"
                 elif not (roe_min <= info_proxy['returnOnEquity'] <= roe_max):
-                    passed = False; reason = f"ROE: {info_proxy['returnOnEquity']:.2f} not in range"
+                    passed = False; reason = f"ROE: {info_proxy['returnOnEquity']:.2%} not in {roe_min:.0%}-{roe_max:.0%}"
                 elif not (roce_min <= info_proxy.get('roce', 0) <= roce_max):
-                    passed = False; reason = f"ROCE: {info_proxy.get('roce', 0):.2f} not in range"
+                    passed = False; reason = f"ROCE: {info_proxy.get('roce', 0):.2%} not in {roce_min:.0%}-{roce_max:.0%}"
                 elif not (profit_growth_min <= info_proxy.get('profitGrowth', 0) <= profit_growth_max):
-                    passed = False; reason = f"Profit Growth: {info_proxy.get('profitGrowth', 0):.2f} not in range"
+                    passed = False; reason = f"Profit Growth: {info_proxy.get('profitGrowth', 0):.2%} not in {profit_growth_min:.0%}-{profit_growth_max:.0%}"
                 elif not (de_min <= info_proxy['debtToEquity'] <= de_max): 
-                    passed = False; reason = f"Debt/Equity: {info_proxy['debtToEquity']:.2f} not in range"
+                    passed = False; reason = f"Debt/Equity: {info_proxy['debtToEquity']:.1f} not in {de_min}-{de_max}"
                 
                 if not passed:
-                    print(f"Fundamental Reject {ticker}: {reason}")
+                    print(f"[FUND] REJECT {ticker}: {reason}", flush=True)
                     return None
+                
+                print(f"[FUND] PASS {ticker}: All fundamentals in range!", flush=True)
     
                 score_data = self._calculate_upside_score(cand.get('df'), info_proxy, region)
                 
