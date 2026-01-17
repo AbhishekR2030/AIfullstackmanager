@@ -137,7 +137,7 @@ const Discovery = () => {
                         <h3 className="section-title"><TrendingUp size={20} color="#10b981" /> Top Buy Candidates (Nifty 500)</h3>
                         <div className="stocks-grid">
                             {scanData.scan_results && scanData.scan_results.map((stock) => (
-                                <StockCard key={stock.ticker} stock={stock} />
+                                <StockCard key={stock.ticker} stock={stock} thresholds={thresholds} />
                             ))}
                         </div>
                         {(!scanData.scan_results || scanData.scan_results.length === 0) &&

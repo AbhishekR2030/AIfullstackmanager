@@ -111,14 +111,52 @@
     line-height: 1.4;
 }
 
+/* Fundamentals Section Styles */
+.fundamentals-section {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.fundamentals-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    padding: 4px 0;
+}
+
+.fundamentals-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #8b5cf6;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.fundamentals-header .arrow {
+    color: #6b7280;
+    transition: transform 0.2s;
+}
+
+.fundamentals-header .arrow.rotate {
+    transform: rotate(90deg);
+}
+
 .fundamentals-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
+    gap: 6px;
     margin-top: 8px;
-    padding: 10px;
-    background: rgba(255, 255, 255, 0.03);
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.02);
     border-radius: 8px;
+}
+
+.fundamentals-grid.expanded {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
 }
 
 .fund-item {
@@ -126,16 +164,72 @@
     flex-direction: column;
     align-items: center;
     gap: 2px;
+    padding: 6px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.fund-row {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Pass/Fail Color Coding */
+.fund-item.pass {
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.fund-item.pass .fund-value {
+    color: #10b981;
+}
+
+.fund-item.fail {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.fund-item.fail .fund-value {
+    color: #ef4444;
+}
+
+.fund-item.neutral {
+    background: rgba(107, 114, 128, 0.1);
+    border: 1px solid rgba(107, 114, 128, 0.2);
 }
 
 .fund-label {
     font-size: 0.65rem;
-    color: #6b7280;
+    color: #9ca3af;
     text-transform: uppercase;
+    letter-spacing: 0.02em;
 }
 
 .fund-value {
-    font-size: 0.8rem;
-    font-weight: 600;
+    font-size: 0.85rem;
+    font-weight: 700;
     color: #e2e8f0;
+}
+
+.fund-threshold {
+    font-size: 0.6rem;
+    color: #6b7280;
+    margin-top: 2px;
+}
+
+/* Thesis Summary */
+.thesis-summary {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.thesis-text {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    margin: 0;
+    line-height: 1.4;
 }

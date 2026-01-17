@@ -1,9 +1,48 @@
 import React from 'react';
-import { ArrowUpRight, Activity, TrendingUp } from 'lucide-react';
+import { ArrowUpRight, Activity, TrendingUp, CheckCircle, XCircle } from 'lucide-react';
 import './StockCard.css';
 
-const StockCard = ({ stock, onClick }) => {
+const StockCard = ({ stock, onClick, thresholds }) => {
     const [showDetails, setShowDetails] = React.useState(false);
+
+    // Default thresholds if not provided
+    const fundThresholds = thresholds?.fundamental || {
+        revenue_growth_min: 10,
+        revenue_growth_max: 100,
+        profit_growth_min: 10,
+        profit_growth_max: 100,
+        roe_min: 12,
+        roe_max: 100,
+        roce_min: 12,
+        roce_max: 100,
+        debt_equity_min: 0,
+        debt_equity_max: 100
+    };
+
+    // Check if a metric is within threshold range
+    const isInRange = (value, min, max) => {
+        return value >= min && value <= max;
+    };
+
+    // Get metric status (pass/fail/neutral)
+    const getMetricStatus = (value, metricType) => {
+        if (value === undefined || value === null) return 'neutral';
+
+        switch (metricType) {
+            case 'revenue_growth':
+                return isInRange(value, fundThresholds.revenue_growth_min, fundThresholds.revenue_growth_max) ? 'pass' : 'fail';
+            case 'profit_growth':
+                return isInRange(value, fundThresholds.profit_growth_min, fundThresholds.profit_growth_max) ? 'pass' : 'fail';
+            case 'roe':
+                return isInRange(value, fundThresholds.roe_min, fundThresholds.roe_max) ? 'pass' : 'fail';
+            case 'roce':
+                return isInRange(value, fundThresholds.roce_min, fundThresholds.roce_max) ? 'pass' : 'fail';
+            case 'debt_equity':
+                return isInRange(value, fundThresholds.debt_equity_min, fundThresholds.debt_equity_max) ? 'pass' : 'fail';
+            default:
+                return 'neutral';
+        }
+    };
 
     return (
         <div className="card stock-card">
@@ -39,68 +78,92 @@ const StockCard = ({ stock, onClick }) => {
                 </div>
             </div>
 
-            {/* Fundamental Thesis Section */}
-            {stock.fundamental_thesis && (
-                <div className="thesis-section mt-3 pt-2 border-top">
+            {/* Enhanced Fundamental Metrics Section with Thresholds */}
+            {stock.fundamentals && (
+                <div className="fundamentals-section">
                     <div
-                        className="thesis-header cursor-pointer"
+                        className="fundamentals-header cursor-pointer"
                         onClick={() => setShowDetails(!showDetails)}
                     >
-                        <span className="thesis-label">
-                            <TrendingUp size={14} /> Why Buy?
+                        <span className="fundamentals-label">
+                            <TrendingUp size={14} /> Fundamentals
                         </span>
                         <ArrowUpRight size={14} className={`arrow ${showDetails ? 'rotate' : ''}`} />
                     </div>
 
-                    <p className="thesis-text">{stock.fundamental_thesis}</p>
-
-                    {showDetails && stock.fundamentals && (
-                        <div className="fundamentals-grid">
-                            <div className="fund-item">
+                    <div className={`fundamentals-grid ${showDetails ? 'expanded' : ''}`}>
+                        {/* Revenue Growth */}
+                        <div className={`fund-item ${getMetricStatus(stock.fundamentals.revenue_growth, 'revenue_growth')}`}>
+                            <div className="fund-row">
                                 <span className="fund-label">Rev Growth</span>
                                 <span className="fund-value">{stock.fundamentals.revenue_growth}%</span>
                             </div>
-                            <div className="fund-item">
-                                <span className="fund-label">Profit Growth</span>
-                                <span className="fund-value">{stock.fundamentals.profit_growth}%</span>
-                            </div>
-                            <div className="fund-item">
+                            {showDetails && (
+                                <span className="fund-threshold">
+                                    Target: {fundThresholds.revenue_growth_min}%-{fundThresholds.revenue_growth_max}%
+                                </span>
+                            )}
+                        </div>
+
+                        {/* ROE */}
+                        <div className={`fund-item ${getMetricStatus(stock.fundamentals.roe, 'roe')}`}>
+                            <div className="fund-row">
                                 <span className="fund-label">ROE</span>
                                 <span className="fund-value">{stock.fundamentals.roe}%</span>
                             </div>
-                            <div className="fund-item">
+                            {showDetails && (
+                                <span className="fund-threshold">
+                                    Target: {fundThresholds.roe_min}%-{fundThresholds.roe_max}%
+                                </span>
+                            )}
+                        </div>
+
+                        {/* ROCE */}
+                        <div className={`fund-item ${getMetricStatus(stock.fundamentals.roce, 'roce')}`}>
+                            <div className="fund-row">
                                 <span className="fund-label">ROCE</span>
                                 <span className="fund-value">{stock.fundamentals.roce}%</span>
                             </div>
-                            <div className="fund-item">
-                                <span className="fund-label">D/E</span>
-                                <span className="fund-value">{stock.fundamentals.debt_equity}%</span>
-                            </div>
+                            {showDetails && (
+                                <span className="fund-threshold">
+                                    Target: {fundThresholds.roce_min}%-{fundThresholds.roce_max}%
+                                </span>
+                            )}
                         </div>
-                    )}
+
+                        {/* Profit Growth */}
+                        <div className={`fund-item ${getMetricStatus(stock.fundamentals.profit_growth, 'profit_growth')}`}>
+                            <div className="fund-row">
+                                <span className="fund-label">Profit Growth</span>
+                                <span className="fund-value">{stock.fundamentals.profit_growth}%</span>
+                            </div>
+                            {showDetails && (
+                                <span className="fund-threshold">
+                                    Target: {fundThresholds.profit_growth_min}%-{fundThresholds.profit_growth_max}%
+                                </span>
+                            )}
+                        </div>
+
+                        {/* Debt/Equity */}
+                        <div className={`fund-item ${getMetricStatus(stock.fundamentals.debt_equity, 'debt_equity')}`}>
+                            <div className="fund-row">
+                                <span className="fund-label">D/E Ratio</span>
+                                <span className="fund-value">{stock.fundamentals.debt_equity}</span>
+                            </div>
+                            {showDetails && (
+                                <span className="fund-threshold">
+                                    Target: {fundThresholds.debt_equity_min}-{fundThresholds.debt_equity_max}
+                                </span>
+                            )}
+                        </div>
+                    </div>
                 </div>
             )}
 
-            {/* Legacy thesis support */}
-            {stock.thesis && stock.thesis.length > 0 && !stock.fundamental_thesis && (
-                <div className="thesis-preview mt-3 pt-2 border-top">
-                    <div
-                        className="d-flex justify-content-between align-items-center cursor-pointer"
-                        onClick={() => setShowDetails(!showDetails)}
-                    >
-                        <span className="text-xs font-bold text-info">AI Thesis</span>
-                        <ArrowUpRight size={14} className={`transform transition ${showDetails ? 'rotate-180' : ''}`} />
-                    </div>
-
-                    {showDetails ? (
-                        <ul className="text-xs text-muted pl-4 mt-2 mb-0">
-                            {stock.thesis.map((pt, i) => <li key={i}>{pt}</li>)}
-                        </ul>
-                    ) : (
-                        <p className="text-xs text-muted mt-1 mb-0 truncate">
-                            {stock.thesis[0]}...
-                        </p>
-                    )}
+            {/* Fundamental Thesis Summary */}
+            {stock.fundamental_thesis && (
+                <div className="thesis-summary">
+                    <p className="thesis-text">{stock.fundamental_thesis}</p>
                 </div>
             )}
         </div>
