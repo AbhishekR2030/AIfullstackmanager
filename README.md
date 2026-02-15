@@ -149,15 +149,26 @@ GOOGLE_API_KEY=your_gemini_api_key
 # HDFC Integration (Optional)
 HDFC_API_KEY=your_hdfc_api_key
 HDFC_API_SECRET=your_hdfc_secret
+HDFC_DEFAULT_REDIRECT_URI=https://alphaseeker.vercel.app
+BACKEND_PUBLIC_URL=https://your-backend-domain
 
 # JWT
 SECRET_KEY=your_jwt_secret
+
+# Google Sign-In (Optional, for /auth/google audience validation)
+GOOGLE_CLIENT_ID=your_google_web_client_id
+GOOGLE_IOS_CLIENT_ID=your_google_ios_client_id
+GOOGLE_SERVER_CLIENT_ID=your_google_server_client_id
 ```
 
 ### Frontend (.env)
 ```env
-VITE_API_URL=http://localhost:8000
+VITE_API_URL=http://localhost:8000/api/v1
+VITE_MOBILE_API_URL=https://your-backend-domain/api/v1
 ```
+
+For iOS deep-link HDFC callback, use app redirect URI:
+`com.alphaseeker.india://auth/callback`
 
 ---
 

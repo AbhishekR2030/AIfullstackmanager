@@ -2,9 +2,12 @@
     display: flex;
     justify-content: center;
     align-items: center;
-    min-height: 100vh;
+    min-height: 100dvh;
+    width: 100%;
     background: radial-gradient(circle at top right, #1e293b, var(--bg-primary));
     padding: 1rem;
+    padding-top: calc(env(safe-area-inset-top) + 1rem);
+    padding-bottom: calc(env(safe-area-inset-bottom) + 1rem);
 }
 
 .login-card {
@@ -26,6 +29,7 @@
     font-size: 2rem;
     background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 100%);
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
     margin-bottom: 0.5rem;
 }

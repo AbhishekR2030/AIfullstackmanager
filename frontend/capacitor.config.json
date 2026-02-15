@@ -1,0 +1,15 @@
+{
+  "appId": "com.alphaseeker.india",
+  "appName": "AlphaSeeker",
+  "webDir": "dist",
+  "plugins": {
+    "GoogleAuth": {
+      "scopes": [
+        "profile",
+        "email"
+      ],
+      "serverClientId": "346290058828-ads5tlqp7a4sgaslafmvu29ob8an84nt.apps.googleusercontent.com",
+      "forceCodeForRefreshToken": true
+    }
+  }
+}

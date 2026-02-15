@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import { fetchPortfolioHistory, getPortfolio } from '../services/api';
@@ -15,11 +15,7 @@ const Dashboard = () => {
     const [timeRange, setTimeRange] = useState('1y');
     const [chartMode, setChartMode] = useState('percent');
 
-    useEffect(() => {
-        loadData();
-    }, [timeRange]);
-
-    const loadData = async () => {
+    const loadData = useCallback(async () => {
         setLoading(true);
         try {
             // Fetch History
@@ -47,7 +43,11 @@ const Dashboard = () => {
         } finally {
             setLoading(false);
         }
-    };
+    }, [timeRange]);
+
+    useEffect(() => {
+        loadData();
+    }, [loadData]);
 
     // ... (rest of chart logic) ...
 
@@ -74,14 +74,12 @@ const Dashboard = () => {
             });
             label = 'Portfolio Return (%)';
 
-            // Color coding for returns (Dynamic based on latest value or overall trend?)
-            // If the latest value is negative, show Red. Else Green.
-            const currentReturn = datasetData[datasetData.length - 1];
+            const currentReturn = datasetData[datasetData.length - 1] ?? 0;
             if (currentReturn < 0) {
-                borderColor = '#ef4444'; // Red
+                borderColor = '#ef4444';
                 backgroundColor = 'rgba(239, 68, 68, 0.1)';
             } else {
-                borderColor = '#10b981'; // Green
+                borderColor = '#10b981';
                 backgroundColor = 'rgba(16, 185, 129, 0.1)';
             }
         }
@@ -92,23 +90,8 @@ const Dashboard = () => {
                 {
                     label,
                     data: datasetData,
-                    borderColor: '#3b82f6', // Fallback
-                    backgroundColor: 'rgba(59, 130, 246, 0.1)', // Fallback
-                    segment: {
-                        borderColor: ctx => {
-                            // If in Percent mode, color based on zero-crossing
-                            if (chartMode === 'percent') {
-                                return ctx.p0.parsed.y < 0 || ctx.p1.parsed.y < 0 ? '#ef4444' : '#10b981';
-                            }
-                            return '#3b82f6'; // Value mode default
-                        },
-                        backgroundColor: ctx => {
-                            if (chartMode === 'percent') {
-                                return ctx.p0.parsed.y < 0 || ctx.p1.parsed.y < 0 ? 'rgba(239, 68, 68, 0.1)' : 'rgba(16, 185, 129, 0.1)';
-                            }
-                            return 'rgba(59, 130, 246, 0.1)';
-                        }
-                    },
+                    borderColor,
+                    backgroundColor,
                     tension: 0.4,
                     fill: true,
                     pointRadius: 0,

@@ -2,7 +2,7 @@ import React from 'react';
 import { ArrowUpRight, Activity, TrendingUp, CheckCircle, XCircle } from 'lucide-react';
 import './StockCard.css';
 
-const StockCard = ({ stock, onClick, thresholds }) => {
+const StockCard = ({ stock, thresholds }) => {
     const [showDetails, setShowDetails] = React.useState(false);
 
     // Default thresholds if not provided

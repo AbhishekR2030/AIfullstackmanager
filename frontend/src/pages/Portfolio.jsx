@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { getPortfolio, addTrade, deleteTrade, searchStocks, syncHDFCPortfolio, getHDFCLoginUrl } from '../services/api';
 import { Plus, TrendingUp, TrendingDown, Trash2, RefreshCw } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
 import './Portfolio.css';
+
+const MOBILE_HDFC_REDIRECT = 'com.alphaseeker.india://auth/callback';
 
 const Portfolio = () => {
     const [portfolio, setPortfolio] = useState([]);
@@ -70,7 +73,7 @@ const Portfolio = () => {
             try {
                 await deleteTrade(ticker);
                 loadPortfolio();
-            } catch (err) {
+            } catch {
                 alert("Failed to delete trade");
             }
         }
@@ -80,21 +83,41 @@ const Portfolio = () => {
         setIsSyncing(true);
         try {
             // First try simple sync (assumes token exists on backend)
-            // But if we want robust OAuth, we can check.
-            // For now, let's try calling sync. If it fails with Auth Error, redirect to login.
-
             await syncHDFCPortfolio();
             await loadPortfolio();
             alert("Portfolio synced successfully with HDFC!");
         } catch (error) {
             console.error("Sync failed:", error);
-            // Check if error is due to missing auth (usually we can check status 401/400)
 
             const confirmLogin = window.confirm("HDFC Sync failed. Do you want to login to HDFC InvestRight to authorize account access?");
             if (confirmLogin) {
-                const loginUrl = await getHDFCLoginUrl();
+                const redirectUri = Capacitor.isNativePlatform() ? MOBILE_HDFC_REDIRECT : null;
+                const loginUrl = await getHDFCLoginUrl(redirectUri);
                 if (loginUrl) {
-                    window.location.href = loginUrl;
+                    try {
+                        // Use Capacitor Browser plugin to open in-app browser
+                        // This keeps the main app alive so session is preserved
+                        const { Browser } = await import('@capacitor/browser');
+                        
+                        // Listen for browser close - then try sync again
+                        const listener = await Browser.addListener('browserFinished', async () => {
+                            listener.remove();
+                            try {
+                                await syncHDFCPortfolio();
+                                await loadPortfolio();
+                                alert("Portfolio synced successfully with HDFC!");
+                            } catch (syncErr) {
+                                console.log("Post-login sync attempt:", syncErr);
+                                alert("Login completed. If sync didn't work, please tap 'Sync HDFC' again.");
+                            }
+                        });
+
+                        await Browser.open({ url: loginUrl });
+                    } catch (browserErr) {
+                        // Fallback for web: open in new tab instead of navigating away
+                        console.log("Browser plugin not available, opening in new tab", browserErr);
+                        window.open(loginUrl, '_blank');
+                    }
                 } else {
                     alert("Could not get login URL from backend.");
                 }
@@ -127,7 +150,7 @@ const Portfolio = () => {
             setShowAddModal(false);
             setNewTrade({ ticker: '', buy_date: '', buy_price: '', quantity: '' });
             loadPortfolio();
-        } catch (error) {
+        } catch {
             alert("Failed to add trade");
         } finally {
             setIsSubmitting(false);

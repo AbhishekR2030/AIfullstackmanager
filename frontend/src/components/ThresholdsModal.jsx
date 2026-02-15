@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Settings, X, RotateCcw } from 'lucide-react';
 import './ThresholdsModal.css';
 
@@ -25,15 +25,58 @@ const DEFAULT_THRESHOLDS = {
     }
 };
 
-const ThresholdsModal = ({ isOpen, onClose, onApply, initialThresholds }) => {
-    const [thresholds, setThresholds] = useState(initialThresholds || DEFAULT_THRESHOLDS);
+const cloneThresholds = (source) => ({
+    technical: { ...source.technical },
+    fundamental: { ...source.fundamental }
+});
 
-    // Sync with initialThresholds when modal opens
-    useEffect(() => {
-        if (isOpen && initialThresholds) {
-            setThresholds(initialThresholds);
-        }
-    }, [isOpen, initialThresholds]);
+const normalizeValue = (value, fallback) => {
+    const parsed = parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const RangeInput = ({
+    label,
+    unit = '',
+    minValue,
+    maxValue,
+    onMinChange,
+    onMaxChange,
+    onMinBlur,
+    onMaxBlur
+}) => (
+    <div className="threshold-row">
+        <label className="threshold-label">{label} {unit && `(${unit})`}</label>
+        <div className="threshold-inputs">
+            <input
+                type="text"
+                inputMode="decimal"
+                pattern="[0-9]*\.?[0-9]*"
+                value={minValue}
+                onChange={onMinChange}
+                onBlur={onMinBlur}
+                placeholder="Min"
+            />
+            <span className="range-separator">to</span>
+            <input
+                type="text"
+                inputMode="decimal"
+                pattern="[0-9]*\.?[0-9]*"
+                value={maxValue}
+                onChange={onMaxChange}
+                onBlur={onMaxBlur}
+                placeholder="Max"
+            />
+        </div>
+    </div>
+);
+
+const ThresholdsModal = ({ isOpen, onClose, onApply, initialThresholds }) => {
+    const initialState = useMemo(
+        () => cloneThresholds(initialThresholds || DEFAULT_THRESHOLDS),
+        [initialThresholds]
+    );
+    const [thresholds, setThresholds] = useState(initialState);
 
     if (!isOpen) return null;
 
@@ -52,7 +95,7 @@ const ThresholdsModal = ({ isOpen, onClose, onApply, initialThresholds }) => {
     const handleBlur = (section, field) => {
         // Ensure valid number on blur
         const val = thresholds[section][field];
-        if (val === '' || isNaN(val)) {
+        if (val === '' || Number.isNaN(Number(val))) {
             const defaultVal = DEFAULT_THRESHOLDS[section][field];
             setThresholds(prev => ({
                 ...prev,
@@ -65,7 +108,7 @@ const ThresholdsModal = ({ isOpen, onClose, onApply, initialThresholds }) => {
     };
 
     const handleReset = () => {
-        setThresholds(DEFAULT_THRESHOLDS);
+        setThresholds(cloneThresholds(DEFAULT_THRESHOLDS));
     };
 
     const handleApply = () => {
@@ -76,42 +119,15 @@ const ThresholdsModal = ({ isOpen, onClose, onApply, initialThresholds }) => {
         };
 
         for (const [key, val] of Object.entries(thresholds.technical)) {
-            cleanThresholds.technical[key] = parseFloat(val) || DEFAULT_THRESHOLDS.technical[key];
+            cleanThresholds.technical[key] = normalizeValue(val, DEFAULT_THRESHOLDS.technical[key]);
         }
         for (const [key, val] of Object.entries(thresholds.fundamental)) {
-            cleanThresholds.fundamental[key] = parseFloat(val) || DEFAULT_THRESHOLDS.fundamental[key];
+            cleanThresholds.fundamental[key] = normalizeValue(val, DEFAULT_THRESHOLDS.fundamental[key]);
         }
 
         onApply(cleanThresholds);
         onClose();
     };
-
-    const RangeInput = ({ label, section, minField, maxField, unit = '' }) => (
-        <div className="threshold-row">
-            <label className="threshold-label">{label} {unit && `(${unit})`}</label>
-            <div className="threshold-inputs">
-                <input
-                    type="text"
-                    inputMode="decimal"
-                    pattern="[0-9]*\.?[0-9]*"
-                    value={thresholds[section][minField]}
-                    onChange={(e) => handleChange(section, minField, e.target.value)}
-                    onBlur={() => handleBlur(section, minField)}
-                    placeholder="Min"
-                />
-                <span className="range-separator">to</span>
-                <input
-                    type="text"
-                    inputMode="decimal"
-                    pattern="[0-9]*\.?[0-9]*"
-                    value={thresholds[section][maxField]}
-                    onChange={(e) => handleChange(section, maxField, e.target.value)}
-                    onBlur={() => handleBlur(section, maxField)}
-                    placeholder="Max"
-                />
-            </div>
-        </div>
-    );
 
     return (
         <div className="modal-overlay" onClick={onClose}>
@@ -129,23 +145,32 @@ const ThresholdsModal = ({ isOpen, onClose, onApply, initialThresholds }) => {
                         <h3 className="section-heading">Technical Parameters</h3>
                         <RangeInput
                             label="RSI"
-                            section="technical"
-                            minField="rsi_min"
-                            maxField="rsi_max"
+                            minValue={thresholds.technical.rsi_min}
+                            maxValue={thresholds.technical.rsi_max}
+                            onMinChange={(e) => handleChange('technical', 'rsi_min', e.target.value)}
+                            onMaxChange={(e) => handleChange('technical', 'rsi_max', e.target.value)}
+                            onMinBlur={() => handleBlur('technical', 'rsi_min')}
+                            onMaxBlur={() => handleBlur('technical', 'rsi_max')}
                         />
                         <RangeInput
                             label="Volatility"
-                            section="technical"
-                            minField="volatility_min"
-                            maxField="volatility_max"
                             unit="%"
+                            minValue={thresholds.technical.volatility_min}
+                            maxValue={thresholds.technical.volatility_max}
+                            onMinChange={(e) => handleChange('technical', 'volatility_min', e.target.value)}
+                            onMaxChange={(e) => handleChange('technical', 'volatility_max', e.target.value)}
+                            onMinBlur={() => handleBlur('technical', 'volatility_min')}
+                            onMaxBlur={() => handleBlur('technical', 'volatility_max')}
                         />
                         <RangeInput
                             label="Volume Shock"
-                            section="technical"
-                            minField="volume_shock_min"
-                            maxField="volume_shock_max"
                             unit="x"
+                            minValue={thresholds.technical.volume_shock_min}
+                            maxValue={thresholds.technical.volume_shock_max}
+                            onMinChange={(e) => handleChange('technical', 'volume_shock_min', e.target.value)}
+                            onMaxChange={(e) => handleChange('technical', 'volume_shock_max', e.target.value)}
+                            onMinBlur={() => handleBlur('technical', 'volume_shock_min')}
+                            onMaxBlur={() => handleBlur('technical', 'volume_shock_max')}
                         />
                     </div>
 
@@ -154,38 +179,53 @@ const ThresholdsModal = ({ isOpen, onClose, onApply, initialThresholds }) => {
                         <h3 className="section-heading">Fundamental Parameters</h3>
                         <RangeInput
                             label="Revenue Growth"
-                            section="fundamental"
-                            minField="revenue_growth_min"
-                            maxField="revenue_growth_max"
                             unit="%"
+                            minValue={thresholds.fundamental.revenue_growth_min}
+                            maxValue={thresholds.fundamental.revenue_growth_max}
+                            onMinChange={(e) => handleChange('fundamental', 'revenue_growth_min', e.target.value)}
+                            onMaxChange={(e) => handleChange('fundamental', 'revenue_growth_max', e.target.value)}
+                            onMinBlur={() => handleBlur('fundamental', 'revenue_growth_min')}
+                            onMaxBlur={() => handleBlur('fundamental', 'revenue_growth_max')}
                         />
                         <RangeInput
                             label="Profit Growth"
-                            section="fundamental"
-                            minField="profit_growth_min"
-                            maxField="profit_growth_max"
                             unit="%"
+                            minValue={thresholds.fundamental.profit_growth_min}
+                            maxValue={thresholds.fundamental.profit_growth_max}
+                            onMinChange={(e) => handleChange('fundamental', 'profit_growth_min', e.target.value)}
+                            onMaxChange={(e) => handleChange('fundamental', 'profit_growth_max', e.target.value)}
+                            onMinBlur={() => handleBlur('fundamental', 'profit_growth_min')}
+                            onMaxBlur={() => handleBlur('fundamental', 'profit_growth_max')}
                         />
                         <RangeInput
                             label="ROE"
-                            section="fundamental"
-                            minField="roe_min"
-                            maxField="roe_max"
                             unit="%"
+                            minValue={thresholds.fundamental.roe_min}
+                            maxValue={thresholds.fundamental.roe_max}
+                            onMinChange={(e) => handleChange('fundamental', 'roe_min', e.target.value)}
+                            onMaxChange={(e) => handleChange('fundamental', 'roe_max', e.target.value)}
+                            onMinBlur={() => handleBlur('fundamental', 'roe_min')}
+                            onMaxBlur={() => handleBlur('fundamental', 'roe_max')}
                         />
                         <RangeInput
                             label="ROCE"
-                            section="fundamental"
-                            minField="roce_min"
-                            maxField="roce_max"
                             unit="%"
+                            minValue={thresholds.fundamental.roce_min}
+                            maxValue={thresholds.fundamental.roce_max}
+                            onMinChange={(e) => handleChange('fundamental', 'roce_min', e.target.value)}
+                            onMaxChange={(e) => handleChange('fundamental', 'roce_max', e.target.value)}
+                            onMinBlur={() => handleBlur('fundamental', 'roce_min')}
+                            onMaxBlur={() => handleBlur('fundamental', 'roce_max')}
                         />
                         <RangeInput
                             label="Debt/Equity"
-                            section="fundamental"
-                            minField="debt_equity_min"
-                            maxField="debt_equity_max"
                             unit="%"
+                            minValue={thresholds.fundamental.debt_equity_min}
+                            maxValue={thresholds.fundamental.debt_equity_max}
+                            onMinChange={(e) => handleChange('fundamental', 'debt_equity_min', e.target.value)}
+                            onMaxChange={(e) => handleChange('fundamental', 'debt_equity_max', e.target.value)}
+                            onMinBlur={() => handleBlur('fundamental', 'debt_equity_min')}
+                            onMaxBlur={() => handleBlur('fundamental', 'debt_equity_max')}
                         />
                     </div>
                 </div>

@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { fetchDiscoveryScan } from '../services/api';
+import React, { useState } from 'react';
+import { fetchDiscoveryScan, triggerAsyncDiscoveryScan, getAsyncDiscoveryStatus, getAsyncDiscoveryResults } from '../services/api';
 import StockCard from '../components/StockCard';
 import ThresholdsModal, { DEFAULT_THRESHOLDS } from '../components/ThresholdsModal';
 import { RefreshCw, ArrowRight, TrendingUp, AlertTriangle, CheckCircle, Settings } from 'lucide-react';
@@ -8,6 +8,7 @@ import './Discovery.css';
 // localStorage keys for persistent data
 const THRESHOLDS_STORAGE_KEY = 'alphaseeker_discovery_thresholds';
 const SCAN_RESULTS_STORAGE_KEY = 'alphaseeker_discovery_results';
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const Discovery = () => {
     // Load scan results from localStorage on mount
@@ -23,6 +24,8 @@ const Discovery = () => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [showThresholds, setShowThresholds] = useState(false);
+    const [thresholdModalKey, setThresholdModalKey] = useState(0);
+    const [scanProgress, setScanProgress] = useState({ percent: 0, message: '' });
 
     // Load thresholds from localStorage on mount
     const [thresholds, setThresholds] = useState(() => {
@@ -38,15 +41,54 @@ const Discovery = () => {
         try {
             setLoading(true);
             setError(null);
-            const data = await fetchDiscoveryScan(customThresholds);
+            setScanProgress({ percent: 0, message: 'Initializing scan...' });
+
+            // Async worker currently supports region-based scanning.
+            // Keep sync endpoint for non-default custom threshold scans.
+            const isDefaultThresholds = JSON.stringify(customThresholds) === JSON.stringify(DEFAULT_THRESHOLDS);
+            let data;
+
+            if (!isDefaultThresholds) {
+                data = await fetchDiscoveryScan(customThresholds);
+            } else {
+                const trigger = await triggerAsyncDiscoveryScan('IN');
+                const jobId = trigger.job_id;
+                let completed = false;
+
+                for (let attempt = 0; attempt < 150; attempt += 1) {
+                    const status = await getAsyncDiscoveryStatus(jobId);
+                    setScanProgress({
+                        percent: Math.max(0, status.percent || 0),
+                        message: status.message || 'Scanning...'
+                    });
+
+                    if (status.state === 'FAILURE') {
+                        throw new Error(status.error || status.message || 'Async scan failed');
+                    }
+
+                    if (status.state === 'SUCCESS' || status.result_ready) {
+                        data = await getAsyncDiscoveryResults(jobId);
+                        completed = true;
+                        break;
+                    }
+
+                    await sleep(2000);
+                }
+
+                if (!completed) {
+                    throw new Error('Scan timed out. Please try again.');
+                }
+            }
+
             setScanData(data);
             // Persist scan results to localStorage
             localStorage.setItem(SCAN_RESULTS_STORAGE_KEY, JSON.stringify(data));
         } catch (err) {
             console.error("Scan error:", err);
-            setError("Failed to scan market. Server might be busy.");
+            setError(err?.message || "Failed to scan market. Server might be busy.");
         } finally {
             setLoading(false);
+            setScanProgress({ percent: 0, message: '' });
         }
     };
 
@@ -55,6 +97,11 @@ const Discovery = () => {
         // Persist thresholds to localStorage
         localStorage.setItem(THRESHOLDS_STORAGE_KEY, JSON.stringify(newThresholds));
         loadData(newThresholds);
+    };
+
+    const openThresholdsModal = () => {
+        setThresholdModalKey((prev) => prev + 1);
+        setShowThresholds(true);
     };
 
     return (
@@ -67,7 +114,7 @@ const Discovery = () => {
                 <div className="header-actions">
                     <button
                         className="btn-thresholds"
-                        onClick={() => setShowThresholds(true)}
+                        onClick={openThresholdsModal}
                         disabled={loading}
                     >
                         <Settings size={18} />
@@ -86,6 +133,7 @@ const Discovery = () => {
 
             {/* Thresholds Modal */}
             <ThresholdsModal
+                key={thresholdModalKey}
                 isOpen={showThresholds}
                 onClose={() => setShowThresholds(false)}
                 onApply={handleApplyThresholds}
@@ -95,7 +143,10 @@ const Discovery = () => {
             {loading ? (
                 <div className="loading-container">
                     <div className="spinner"></div>
-                    <p>Scanning 500+ Assets & Analyzing Portfolio...</p>
+                    <p>{scanProgress.message || 'Scanning 500+ Assets & Analyzing Portfolio...'}</p>
+                    {scanProgress.percent > 0 && (
+                        <p className="text-muted">Progress: {scanProgress.percent}%</p>
+                    )}
                 </div>
             ) : error ? (
                 <div className="error-container"><p className="text-danger">{error}</p></div>

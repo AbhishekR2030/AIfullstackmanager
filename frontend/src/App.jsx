@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { StatusBar, Style } from '@capacitor/status-bar';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import Discovery from './pages/Discovery';
@@ -16,6 +17,20 @@ const ProtectedRoute = ({ children }) => {
 };
 
 function App() {
+  useEffect(() => {
+    // Customize Status Bar for iOS
+    const configureStatusBar = async () => {
+      try {
+        await StatusBar.setStyle({ style: Style.Dark });
+        // Optional: Set background color if needed for Android/other platforms
+        // await StatusBar.setBackgroundColor({ color: '#0f1115' });
+      } catch (err) {
+        console.log("Status Bar plugin not available (web mode)", err);
+      }
+    };
+    configureStatusBar();
+  }, []);
+
   return (
     <Router>
       <Routes>

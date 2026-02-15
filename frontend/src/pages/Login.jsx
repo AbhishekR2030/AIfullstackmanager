@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import api from '../services/api';
+import api, { loginWithGoogle } from '../services/api';
+import { GoogleAuth } from '@codetrix-studio/capacitor-google-auth';
 import './Login.css';
 
 const Login = () => {
@@ -10,6 +11,30 @@ const Login = () => {
     const [error, setError] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const navigate = useNavigate();
+
+    // Initialize Google Auth
+    React.useEffect(() => {
+        GoogleAuth.initialize();
+    }, []);
+
+    const handleGoogleLogin = async () => {
+        try {
+            const googleUser = await GoogleAuth.signIn();
+            const idToken = googleUser?.authentication?.idToken;
+            if (!idToken) {
+                throw new Error("Missing Google ID token");
+            }
+
+            const response = await loginWithGoogle(idToken);
+            localStorage.setItem('token', response.access_token);
+            localStorage.setItem('userEmail', googleUser.email || '');
+            api.defaults.headers.common['Authorization'] = `Bearer ${response.access_token}`;
+            navigate('/');
+        } catch (error) {
+            console.error("Google Sign-In Error:", error);
+            setError(error?.response?.data?.detail || "Google Sign-In failed");
+        }
+    };
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -102,7 +127,7 @@ const Login = () => {
                 </div>
 
                 <div className="social-login">
-                    <button className="btn-social" disabled>
+                    <button className="btn-social" onClick={handleGoogleLogin}>
                         <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" width="20" />
                         Google
                     </button>

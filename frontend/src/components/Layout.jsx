@@ -2,38 +2,88 @@ import React, { useEffect } from 'react';
 import { Link, useLocation, useNavigate, Outlet } from 'react-router-dom';
 import { handleHDFCCallback, syncHDFCPortfolio } from '../services/api';
 import { LayoutDashboard, Telescope, PieChart, LogOut } from 'lucide-react';
+import { Haptics, ImpactStyle } from '@capacitor/haptics';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import './Layout.css';
+
+const AppPlugin = registerPlugin('App');
 
 const Layout = ({ children }) => {
     const location = useLocation();
     const navigate = useNavigate();
 
+    const handleNavClick = async () => {
+        try {
+            await Haptics.impact({ style: ImpactStyle.Light });
+        } catch {
+            // Haptics plugin not available on some web environments.
+        }
+    };
+
     useEffect(() => {
-        const checkForHDFCToken = async () => {
-            const params = new URLSearchParams(location.search);
+        const handleHDFCResult = async (params, clearWebQuery = false) => {
             const requestToken = params.get('requestToken') || params.get('request_token');
+            const status = params.get('hdfc_status');
+            const error = params.get('error');
 
-            if (requestToken) {
-                try {
-                    console.log("Found HDFC Token, processing...", requestToken);
-                    // 1. Send to backend to exchange for access token
+            if (!requestToken && !status) {
+                return;
+            }
+
+            try {
+                if (requestToken) {
                     await handleHDFCCallback(requestToken);
+                }
 
-                    // 2. Trigger a sync immediately
-                    await syncHDFCPortfolio();
+                if (status === 'error') {
+                    throw new Error(error || 'HDFC authorization failed');
+                }
 
-                    alert("HDFC Login Successful! Portfolio Synced.");
-
-                    // 3. Clear the URL
+                await syncHDFCPortfolio();
+                alert("HDFC Login Successful! Portfolio Synced.");
+            } catch (callbackError) {
+                console.error("HDFC Callback Error:", callbackError);
+                alert("Failed to complete HDFC Login.");
+            } finally {
+                if (clearWebQuery) {
                     navigate(location.pathname, { replace: true });
-                } catch (error) {
-                    console.error("HDFC Callback Error:", error);
-                    alert("Failed to complete HDFC Login.");
                 }
             }
         };
 
-        checkForHDFCToken();
+        // Web fallback flow: callback params in current URL.
+        const currentParams = new URLSearchParams(location.search);
+        handleHDFCResult(currentParams, true);
+
+        // Native flow: callback opened via deep link.
+        let appUrlListener;
+        const registerListener = async () => {
+            try {
+                if (!Capacitor.isNativePlatform()) {
+                    return;
+                }
+
+                appUrlListener = await AppPlugin.addListener('appUrlOpen', ({ url }) => {
+                    try {
+                        const parsedUrl = new URL(url);
+                        const deepLinkParams = new URLSearchParams(parsedUrl.search);
+                        handleHDFCResult(deepLinkParams, false);
+                    } catch (parseError) {
+                        console.error("Failed to parse deep link URL", parseError);
+                    }
+                });
+            } catch (listenerError) {
+                console.log("App URL listener unavailable", listenerError);
+            }
+        };
+
+        registerListener();
+
+        return () => {
+            if (appUrlListener) {
+                appUrlListener.remove();
+            }
+        };
     }, [location, navigate]);
 
     const isActive = (path) => location.pathname === path ? 'active' : '';
@@ -55,15 +105,15 @@ const Layout = ({ children }) => {
                 </div>
 
                 <div className="nav-links">
-                    <Link to="/" className={`nav-item ${isActive('/')}`}>
+                    <Link to="/" className={`nav-item ${isActive('/')}`} onClick={handleNavClick}>
                         <LayoutDashboard size={20} />
                         <span>Dashboard</span>
                     </Link>
-                    <Link to="/discovery" className={`nav-item ${isActive('/discovery')}`}>
+                    <Link to="/discovery" className={`nav-item ${isActive('/discovery')}`} onClick={handleNavClick}>
                         <Telescope size={20} />
                         <span>Discovery</span>
                     </Link>
-                    <Link to="/portfolio" className={`nav-item ${isActive('/portfolio')}`}>
+                    <Link to="/portfolio" className={`nav-item ${isActive('/portfolio')}`} onClick={handleNavClick}>
                         <PieChart size={20} />
                         <span>Portfolio</span>
                     </Link>
@@ -84,13 +134,13 @@ const Layout = ({ children }) => {
 
             {/* Mobile Bottom Bar */}
             <nav className="mobile-nav">
-                <Link to="/" className={`mobile-nav-item ${isActive('/')}`}>
+                <Link to="/" className={`mobile-nav-item ${isActive('/')}`} onClick={handleNavClick}>
                     <LayoutDashboard size={24} />
                 </Link>
-                <Link to="/discovery" className={`mobile-nav-item ${isActive('/discovery')}`}>
+                <Link to="/discovery" className={`mobile-nav-item ${isActive('/discovery')}`} onClick={handleNavClick}>
                     <Telescope size={24} />
                 </Link>
-                <Link to="/portfolio" className={`mobile-nav-item ${isActive('/portfolio')}`}>
+                <Link to="/portfolio" className={`mobile-nav-item ${isActive('/portfolio')}`} onClick={handleNavClick}>
                     <PieChart size={24} />
                 </Link>
                 <button className="mobile-nav-item btn-logout-mobile" onClick={handleLogout}>

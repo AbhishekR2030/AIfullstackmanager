@@ -1,7 +1,10 @@
 
 from datetime import datetime, timedelta
 import pandas as pd
-import pandas_ta as ta
+try:
+    import pandas_ta as ta
+except ImportError:
+    ta = None
 import yfinance as yf
 import numpy as np
 
@@ -14,9 +17,14 @@ class RebalancerEngine:
         """
         try:
             # --- 1. Momentum Score (30%) ---
-            rsi = ta.rsi(df['Close'], length=14).iloc[-1]
-            macd = ta.macd(df['Close'])
-            macd_hist = macd['MACDh_12_26_9'].iloc[-1]
+            if ta:
+                rsi = ta.rsi(df['Close'], length=14).iloc[-1]
+                macd = ta.macd(df['Close'])
+                macd_hist = macd['MACDh_12_26_9'].iloc[-1]
+            else:
+                # Fallback if pandas_ta is missing
+                rsi = 50.0
+                macd_hist = 0.0
             
             rsi_score = np.clip((rsi - 50) * 5, 0, 100)
             macd_score = 100 if macd_hist > 0 else 0
@@ -114,6 +122,7 @@ class RebalancerEngine:
             recommendation = "HOLD"
             reason = ""
             score_data = {"total_score": 0, "upside_pct": 0, "mom_score": 0}
+            score = 0.0
             trend = "Unknown"
             
             try:

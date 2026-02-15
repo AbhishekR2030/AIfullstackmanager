@@ -2,6 +2,7 @@
 import os
 import requests
 from datetime import datetime
+import urllib.parse
 
 # You can toggle this to True to use a hardcoded mock for testing without API keys
 MOCK_MODE = False
@@ -9,59 +10,58 @@ MOCK_MODE = False
 class HDFCEngine:
     def __init__(self):
         self.base_url = "https://developer.hdfcsec.com/oapi/v1"
-        self.api_key = os.getenv("HDFC_API_KEY")
-        self.api_secret = os.getenv("HDFC_API_SECRET")
-        self.access_token = os.getenv("HDFC_ACCESS_TOKEN") # Optional: can be manually set, or generated
-        
-        if not self.api_key or not self.api_secret:
-             print("Warning: HDFC_API_KEY or HDFC_API_SECRET not set.")
+        # NOTE: We read env vars lazily (in methods) instead of here,
+        # because this class is instantiated at module import time
+        # which may be before load_dotenv() runs.
+        self.access_token = None
+
+    def _get_api_key(self):
+        return os.getenv("HDFC_API_KEY")
+
+    def _get_api_secret(self):
+        return os.getenv("HDFC_API_SECRET")
 
     def get_login_url(self, redirect_uri=None):
         """
         Returns the URL to redirect the user to for HDFC login.
         """
-        if not self.api_key:
+        if MOCK_MODE:
+            return "https://google.com" 
+
+        api_key = self._get_api_key()
+        if not api_key:
              return None
-        
-        # NOTE: HDFC API typically requires:
-        # 1. GET /login?api_key=... -> returns token_id (sometimes step 1 is skipped if we just need login page)
-        # But most often, we redirect user to:
-        # https://allinone.hdfcsec.com/login?api_key=...&redirect_url=...
-        
-        # Based on search results:
-        # Step 1: Get token_id
-        # Step 2: Validate (Password) - This is for building a custom client.
-        # But for OAUTH (Web App), we typically redirect to an Auth URL.
-        
-        # Since exact OAuth URL varies, we will try the standard pattern or the one found.
-        # If we are building a "User-facing" app, the user logs in on HDFC Portal.
-        
-        # Let's assume the standard `https://developer.hdfcsec.com/oapi/v1/login` or similar is for API usage.
-        # But for a user to "Authorize" our app, we usually need:
-        # https://<hdfc-auth-domain>/authorize?client_id=...&redirect_uri=...
-        
-        # Given the documentation is specific about "Indivudal API", let's use the flow:
-        # We redirect to our own frontend page which might ask for username/password if HDFC doesn't support standard OAuth redirect?
-        # NO, HDFC Must support standard OAuth redirect if they ask for `redirect_url` in app creation.
-        
-        # Let's try constructing the standard URL.
-        # User confirmed that only the frontend URL was accepted in the portal.
-        target_uri = redirect_uri or "https://alphaseeker.vercel.app"
-        
-        # URL Encoded redirect_uri
-        import urllib.parse
-        encoded_redirect = urllib.parse.quote(target_uri)
+
+        default_redirect = os.getenv("HDFC_DEFAULT_REDIRECT_URI", "https://alphaseeker.vercel.app")
+        target_uri = redirect_uri or default_redirect
+
+        # For custom-scheme app redirects, route through backend callback first.
+        # This avoids broker restrictions where only HTTPS redirect URLs are allowed.
+        is_custom_scheme = bool(target_uri and "://" in target_uri and not target_uri.startswith(("http://", "https://")))
+        backend_public_url = os.getenv("BACKEND_PUBLIC_URL", "").strip()
+        if is_custom_scheme and backend_public_url:
+            callback_url = f"{backend_public_url.rstrip('/')}/api/v1/auth/callback"
+            encoded_app_redirect = urllib.parse.quote(target_uri, safe="")
+            target_uri = f"{callback_url}?app_redirect={encoded_app_redirect}"
+
+        encoded_redirect = urllib.parse.quote(target_uri, safe="")
         
         # Construct the login URL
         # Assumption: A login page that accepts api_key and redirect_url
-        login_url = f"https://developer.hdfcsec.com/oapi/v1/login?api_key={self.api_key}&redirect_url={encoded_redirect}"
+        login_url = f"https://developer.hdfcsec.com/oapi/v1/login?api_key={api_key}&redirect_url={encoded_redirect}"
         return login_url
 
     def exchange_token(self, request_token):
         """
         Exchanges the request_token (received after login) for an access_token.
         """
-        if not self.api_key or not self.api_secret:
+        if MOCK_MODE:
+            self.access_token = "mock_hdfc_token_123"
+            return {"success": True, "access_token": self.access_token}
+
+        api_key = self._get_api_key()
+        api_secret = self._get_api_secret()
+        if not api_key or not api_secret:
              print("HDFC Exchange Error: Missing credentials")
              return {"error": "Missing credentials"}
              
@@ -70,13 +70,8 @@ class HDFCEngine:
              "Content-Type": "application/json"
         }
         
-        # HDFC typically expects specific body or form params
-        # Providing api_key in query and secret in body/params
-        # CRITICAL FIX: Ensure keys match HDFC spec exactly.
-        # Some docs suggest 'apiSecret' in body.
-        
-        params = { "api_key": self.api_key, "request_token": request_token }
-        body = { "apiSecret": self.api_secret }
+        params = { "api_key": api_key, "request_token": request_token }
+        body = { "apiSecret": api_secret }
         
         print(f"Exchanging Token. URL: {url}, Params: {params}") # Debug Log
         
@@ -91,8 +86,6 @@ class HDFCEngine:
              if response.status_code != 200:
                   return {"error": f"HDFC API Error: {response.status_code} {response.text}"}
 
-             data = response.json()
-             
              data = response.json()
              
              # FIX: Handle camelCase 'accessToken' from HDFC
@@ -132,19 +125,19 @@ class HDFCEngine:
         if MOCK_MODE:
             return self._get_mock_holdings()
 
-        if not self.api_key or not self.access_token:
+        api_key = self._get_api_key()
+        if not api_key or not self.access_token:
             return {"error": "HDFC API credentials not configured in environment."}
 
         try:
             url = f"{self.base_url}/portfolio/holdings"
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
-                "x-api-key": self.api_key, # Usually required in header or query param
+                "x-api-key": api_key,
                 "Accept": "application/json"
             }
-            # Some APIs require api_key in query param
             params = {
-                "api_key": self.api_key
+                "api_key": api_key
             }
 
             response = requests.get(url, headers=headers, params=params, timeout=10)
@@ -355,7 +348,8 @@ class HDFCEngine:
         
         print("[TRADE_BOOK] Starting fetch_tradebook_dates...", flush=True)
         
-        if not self.api_key or not self.access_token:
+        api_key = self._get_api_key()
+        if not api_key or not self.access_token:
             print("[TRADE_BOOK] Skipping - no credentials", flush=True)
             return {}
         
@@ -365,21 +359,20 @@ class HDFCEngine:
             
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
-                "x-api-key": self.api_key,
+                "x-api-key": api_key,
                 "Accept": "application/json"
             }
             
-            # Add date range to get historical trades (last 2 years)
             from datetime import timedelta
             today = datetime.now()
-            from_date = (today - timedelta(days=730)).strftime("%Y-%m-%d")  # 2 years ago
+            from_date = (today - timedelta(days=730)).strftime("%Y-%m-%d")
             to_date = today.strftime("%Y-%m-%d")
             
             params = {
-                "api_key": self.api_key,
+                "api_key": api_key,
                 "from_date": from_date,
                 "to_date": to_date,
-                "segment": "EQ"  # Equity segment
+                "segment": "EQ"
             }
             print(f"[TRADE_BOOK] Params: from_date={from_date}, to_date={to_date}", flush=True)
             
@@ -519,4 +512,3 @@ class HDFCEngine:
                 "source": "HDFC"
             }
         ]
-

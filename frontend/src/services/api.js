@@ -1,7 +1,25 @@
 import axios from 'axios';
+import { Capacitor } from '@capacitor/core';
+
+const resolveApiBaseUrl = () => {
+    const configuredUrl = (import.meta.env.VITE_API_URL || '').trim();
+    if (configuredUrl) {
+        return configuredUrl;
+    }
+
+    if (Capacitor.isNativePlatform()) {
+        const nativeUrl = (import.meta.env.VITE_MOBILE_API_URL || '').trim();
+        if (nativeUrl) {
+            return nativeUrl;
+        }
+        return 'https://alphaseeker-backend.onrender.com/api/v1';
+    }
+
+    return '/api/v1';
+};
 
 const api = axios.create({
-    baseURL: import.meta.env.VITE_API_URL || '/api/v1',
+    baseURL: resolveApiBaseUrl(),
     headers: {
         'Content-Type': 'application/json',
     },
@@ -35,6 +53,16 @@ export const fetchAnalysis = async (ticker) => {
     }
 };
 
+export const loginWithGoogle = async (idToken) => {
+    try {
+        const response = await api.post('/auth/google', { id_token: idToken });
+        return response.data;
+    } catch (error) {
+        console.error("Error logging in with Google:", error);
+        throw error;
+    }
+};
+
 export const getPortfolio = async () => {
     try {
         const response = await api.get('/portfolio');
@@ -43,7 +71,7 @@ export const getPortfolio = async () => {
         console.error("Error fetching portfolio:", error);
         throw error;
     }
-}
+};
 
 export const addTrade = async (trade) => {
     try {
@@ -53,7 +81,7 @@ export const addTrade = async (trade) => {
         console.error("Error adding trade:", error);
         throw error;
     }
-}
+};
 
 export const deleteTrade = async (ticker) => {
     try {
@@ -63,7 +91,7 @@ export const deleteTrade = async (ticker) => {
         console.error("Error deleting trade:", error);
         throw error;
     }
-}
+};
 
 export const searchStocks = async (query) => {
     try {
@@ -73,7 +101,7 @@ export const searchStocks = async (query) => {
         console.error("Error searching stocks:", error);
         return [];
     }
-}
+};
 
 export const fetchPortfolioHistory = async (period = '1y') => {
     try {
@@ -83,7 +111,7 @@ export const fetchPortfolioHistory = async (period = '1y') => {
         console.error("Error fetching portfolio history:", error);
         throw error;
     }
-}
+};
 
 export const fetchDiscoveryScan = async (thresholds = null) => {
     try {
@@ -93,27 +121,63 @@ export const fetchDiscoveryScan = async (thresholds = null) => {
         console.error("Error fetching discovery scan:", error);
         throw error;
     }
-}
+};
 
-export const getHDFCLoginUrl = async () => {
+export const triggerAsyncDiscoveryScan = async (region = 'IN') => {
     try {
-        const response = await api.get('/auth/hdfc/login');
+        const response = await api.post('/discovery/scan/async', { region });
+        return response.data;
+    } catch (error) {
+        console.error("Error triggering async discovery scan:", error);
+        throw error;
+    }
+};
+
+export const getAsyncDiscoveryStatus = async (jobId) => {
+    try {
+        const response = await api.get(`/discovery/status/${jobId}`);
+        return response.data;
+    } catch (error) {
+        console.error("Error fetching async discovery status:", error);
+        throw error;
+    }
+};
+
+export const getAsyncDiscoveryResults = async (jobId) => {
+    try {
+        const response = await api.get(`/discovery/results/${jobId}`);
+        return response.data;
+    } catch (error) {
+        console.error("Error fetching async discovery results:", error);
+        throw error;
+    }
+};
+
+export const getHDFCLoginUrl = async (redirectUri = null) => {
+    try {
+        const suffix = redirectUri ? `?redirect_uri=${encodeURIComponent(redirectUri)}` : '';
+        const response = await api.get(`/auth/hdfc/login${suffix}`);
         return response.data.login_url;
     } catch (error) {
         console.error("Error getting HDFC login URL:", error);
         return null;
     }
-}
+};
 
-export const handleHDFCCallback = async (requestToken) => {
+export const handleHDFCCallback = async (requestToken, appRedirect = null) => {
     try {
-        const response = await api.get(`/auth/callback?request_token=${requestToken}`);
+        const params = new URLSearchParams();
+        params.append('request_token', requestToken);
+        if (appRedirect) {
+            params.append('app_redirect', appRedirect);
+        }
+        const response = await api.get(`/auth/callback?${params.toString()}`);
         return response.data;
     } catch (error) {
         console.error("Error handling HDFC callback:", error);
         throw error;
     }
-}
+};
 
 export const syncHDFCPortfolio = async () => {
     try {
@@ -123,6 +187,6 @@ export const syncHDFCPortfolio = async () => {
         console.error("Error syncing HDFC portfolio:", error);
         throw error;
     }
-}
+};
 
 export default api;

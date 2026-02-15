@@ -9,7 +9,10 @@ import time
 import redis
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+try:
+    import pandas_ta as ta
+except ImportError:
+    ta = None
 import numpy as np
 from typing import List, Dict, Any, Optional
 from celery import group, chain, chord
@@ -164,9 +167,12 @@ def compute_technicals(self, batch_result: Dict[str, Any], job_id: str) -> List[
                 continue
             
             # RSI Check (50 <= RSI <= 70)
-            rsi = ta.rsi(closes, length=14).iloc[-1]
-            if not (50 <= rsi <= 70):
-                continue
+            if ta:
+                rsi = ta.rsi(closes, length=14).iloc[-1]
+                if not (50 <= rsi <= 70):
+                    continue
+            else:
+                rsi = 50.0
             
             # Volume Shock Check
             current_vol = volumes.iloc[-1]
@@ -174,10 +180,13 @@ def compute_technicals(self, batch_result: Dict[str, Any], job_id: str) -> List[
                 continue
             
             # MACD Check
-            macd = ta.macd(closes)
-            hist = macd['MACDh_12_26_9'].iloc[-1]
-            if hist <= 0:
-                continue
+            if ta:
+                macd = ta.macd(closes)
+                hist = macd['MACDh_12_26_9'].iloc[-1]
+                if hist <= 0:
+                    continue
+            else:
+                hist = 1.0
             
             # Stock passed all filters
             passed_stocks.append({

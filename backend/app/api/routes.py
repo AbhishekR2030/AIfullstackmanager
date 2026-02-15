@@ -1,6 +1,11 @@
 
+import os
+import requests
+import secrets
+from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
+
 from fastapi import APIRouter, HTTPException, Depends, status
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import timedelta
@@ -31,6 +36,67 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
+class GoogleLoginRequest(BaseModel):
+    id_token: str
+
+def _build_redirect_url(base_url: str, params: dict) -> str:
+    """
+    Safely appends query params while preserving existing query values.
+    """
+    split_url = urlsplit(base_url)
+    merged_query = dict(parse_qsl(split_url.query, keep_blank_values=True))
+    merged_query.update({k: v for k, v in params.items() if v is not None})
+    return urlunsplit((
+        split_url.scheme,
+        split_url.netloc,
+        split_url.path,
+        urlencode(merged_query),
+        split_url.fragment
+    ))
+
+def _verify_google_id_token(id_token: str):
+    """
+    Verifies a Google ID token against Google's tokeninfo endpoint.
+    """
+    if not id_token:
+        return None, "Missing Google ID token"
+
+    try:
+        response = requests.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"id_token": id_token},
+            timeout=10
+        )
+    except Exception as exc:
+        return None, f"Google token verification failed: {exc}"
+
+    if response.status_code != 200:
+        return None, "Invalid Google token"
+
+    payload = response.json()
+    issuer = payload.get("iss")
+    if issuer not in {"accounts.google.com", "https://accounts.google.com"}:
+        return None, "Invalid Google token issuer"
+
+    allowed_audiences = {
+        value.strip()
+        for value in [
+            os.getenv("GOOGLE_CLIENT_ID", ""),
+            os.getenv("GOOGLE_IOS_CLIENT_ID", ""),
+            os.getenv("GOOGLE_SERVER_CLIENT_ID", ""),
+        ]
+        if value and value.strip()
+    }
+    audience = payload.get("aud")
+    if allowed_audiences and audience not in allowed_audiences:
+        return None, "Google token audience mismatch"
+
+    email = payload.get("email")
+    if not email:
+        return None, "Google token missing email"
+
+    return payload, None
+
 # --- Auth Routes ---
 @router.post("/auth/signup", response_model=Token)
 async def signup(user: UserCreate, db: SessionLocal = Depends(auth_engine.get_db)):
@@ -47,6 +113,27 @@ async def signup(user: UserCreate, db: SessionLocal = Depends(auth_engine.get_db
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@router.post("/auth/google", response_model=Token)
+async def login_google(data: GoogleLoginRequest, db: SessionLocal = Depends(auth_engine.get_db)):
+    payload, verify_error = _verify_google_id_token(data.id_token)
+    if verify_error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=verify_error
+        )
+
+    email = payload.get("email")
+    user = auth_engine.get_user_by_email(db, email=email)
+    if not user:
+        # Create user on first Google login
+        auth_engine.create_user(db, email=email, password=secrets.token_urlsafe(32))
+
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": email}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -90,7 +177,8 @@ async def hdfc_login(redirect_uri: Optional[str] = None):
 async def auth_callback(
     code: Optional[str] = None, 
     request_token: Optional[str] = None,
-    state: Optional[str] = None
+    state: Optional[str] = None,
+    app_redirect: Optional[str] = None
 ):
     """
     Generic callback handler for OAuth flows.
@@ -101,14 +189,33 @@ async def auth_callback(
     if token:
            # Attempt exchange
            result = hdfc_engine.exchange_token(token)
-           
+
            if "error" in result:
+                if app_redirect:
+                    redirect_url = _build_redirect_url(app_redirect, {
+                        "hdfc_status": "error",
+                        "error": result.get("error", "Token exchange failed")
+                    })
+                    return RedirectResponse(url=redirect_url, status_code=302)
                 return {"message": "Token exchange failed", "details": result}
-           
+
+           if app_redirect:
+                redirect_url = _build_redirect_url(app_redirect, {
+                    "hdfc_status": "success"
+                })
+                return RedirectResponse(url=redirect_url, status_code=302)
+
            # If successful, we should verify the user and perhaps redirect them back to the frontend
            # For now, simplistic response
            return {"message": "Authorization successful. You can close this window.", "access_token": result.get("access_token")}
-           
+
+    if app_redirect:
+        redirect_url = _build_redirect_url(app_redirect, {
+            "hdfc_status": "error",
+            "error": "No code received"
+        })
+        return RedirectResponse(url=redirect_url, status_code=302)
+
     return {"message": "No code received", "params": {"code": code, "request_token": request_token}}
 
 # --- Existing Routes ---
@@ -456,4 +563,3 @@ async def get_async_scan_results(job_id: str, current_user = Depends(get_current
     except Exception as e:
         print(f"Results Fetch Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
