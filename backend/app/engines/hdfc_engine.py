@@ -1,11 +1,39 @@
-
 import os
 import requests
 from datetime import datetime
 import urllib.parse
+from sqlalchemy import Column, DateTime, Integer, String, create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 # You can toggle this to True to use a hardcoded mock for testing without API keys
 MOCK_MODE = False
+
+
+def _resolve_database_url():
+    url = os.getenv("DATABASE_URL", "sqlite:///./users.db")
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return url
+
+
+HDFC_SQLALCHEMY_DATABASE_URL = _resolve_database_url()
+HDFC_TOKEN_ENGINE = create_engine(
+    HDFC_SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False} if "sqlite" in HDFC_SQLALCHEMY_DATABASE_URL else {}
+)
+HDFC_TOKEN_SESSION = sessionmaker(autocommit=False, autoflush=False, bind=HDFC_TOKEN_ENGINE)
+HDFC_TOKEN_BASE = declarative_base()
+
+
+class HDFCAccessToken(HDFC_TOKEN_BASE):
+    __tablename__ = "hdfc_access_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+HDFC_TOKEN_BASE.metadata.create_all(bind=HDFC_TOKEN_ENGINE)
 
 class HDFCEngine:
     def __init__(self):
@@ -20,6 +48,50 @@ class HDFCEngine:
 
     def _get_api_secret(self):
         return os.getenv("HDFC_API_SECRET")
+
+    def _persist_access_token(self, token):
+        if not token:
+            return
+
+        db = HDFC_TOKEN_SESSION()
+        try:
+            latest = db.query(HDFCAccessToken).order_by(HDFCAccessToken.id.desc()).first()
+            if latest:
+                latest.token = token
+                latest.created_at = datetime.utcnow()
+            else:
+                db.add(HDFCAccessToken(token=token))
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"HDFC token persist error: {e}")
+        finally:
+            db.close()
+
+    def _load_access_token(self):
+        db = HDFC_TOKEN_SESSION()
+        try:
+            latest = db.query(HDFCAccessToken).order_by(HDFCAccessToken.id.desc()).first()
+            return latest.token if latest and latest.token else None
+        except Exception as e:
+            print(f"HDFC token load error: {e}")
+            return None
+        finally:
+            db.close()
+
+    def _set_access_token(self, token):
+        self.access_token = token
+        self._persist_access_token(token)
+
+    def _get_effective_access_token(self):
+        if self.access_token:
+            return self.access_token
+
+        persisted = self._load_access_token()
+        if persisted:
+            self.access_token = persisted
+            return persisted
+        return None
 
     def get_login_url(self, redirect_uri=None):
         """
@@ -45,10 +117,15 @@ class HDFCEngine:
             target_uri = f"{callback_url}?app_redirect={encoded_app_redirect}"
 
         encoded_redirect = urllib.parse.quote(target_uri, safe="")
-        
-        # Construct the login URL
-        # Assumption: A login page that accepts api_key and redirect_url
-        login_url = f"https://developer.hdfcsec.com/oapi/v1/login?api_key={api_key}&redirect_url={encoded_redirect}"
+
+        # Some HDFC environments expect redirect_url while others use redirect_uri.
+        # Send both to maximize compatibility.
+        login_url = (
+            "https://developer.hdfcsec.com/oapi/v1/login"
+            f"?api_key={api_key}"
+            f"&redirect_url={encoded_redirect}"
+            f"&redirect_uri={encoded_redirect}"
+        )
         return login_url
 
     def exchange_token(self, request_token):
@@ -56,7 +133,7 @@ class HDFCEngine:
         Exchanges the request_token (received after login) for an access_token.
         """
         if MOCK_MODE:
-            self.access_token = "mock_hdfc_token_123"
+            self._set_access_token("mock_hdfc_token_123")
             return {"success": True, "access_token": self.access_token}
 
         api_key = self._get_api_key()
@@ -96,8 +173,7 @@ class HDFCEngine:
                   token = data["data"].get("access_token") or data["data"].get("accessToken")
 
              if token:
-                  self.access_token = token
-                  # Ideally save this to DB/Session so it persists across requests (for simple app, in-memory is fragile but okay for immediate sync)
+                  self._set_access_token(token)
                   print(f"Token Exchange Success. Token Length: {len(self.access_token)}")
                   return {"success": True, "access_token": self.access_token}
              else:
@@ -126,13 +202,16 @@ class HDFCEngine:
             return self._get_mock_holdings()
 
         api_key = self._get_api_key()
-        if not api_key or not self.access_token:
-            return {"error": "HDFC API credentials not configured in environment."}
+        token = self._get_effective_access_token()
+        if not api_key:
+            return {"error": "HDFC API key is not configured on backend."}
+        if not token:
+            return {"error": "HDFC authorization missing or expired. Please login to HDFC again."}
 
         try:
             url = f"{self.base_url}/portfolio/holdings"
             headers = {
-                "Authorization": f"Bearer {self.access_token}",
+                "Authorization": f"Bearer {token}",
                 "x-api-key": api_key,
                 "Accept": "application/json"
             }
@@ -349,7 +428,8 @@ class HDFCEngine:
         print("[TRADE_BOOK] Starting fetch_tradebook_dates...", flush=True)
         
         api_key = self._get_api_key()
-        if not api_key or not self.access_token:
+        token = self._get_effective_access_token()
+        if not api_key or not token:
             print("[TRADE_BOOK] Skipping - no credentials", flush=True)
             return {}
         
@@ -358,7 +438,7 @@ class HDFCEngine:
             print(f"[TRADE_BOOK] Calling URL: {url}", flush=True)
             
             headers = {
-                "Authorization": f"Bearer {self.access_token}",
+                "Authorization": f"Bearer {token}",
                 "x-api-key": api_key,
                 "Accept": "application/json"
             }

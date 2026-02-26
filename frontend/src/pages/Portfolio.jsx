@@ -6,6 +6,28 @@ import './Portfolio.css';
 
 const MOBILE_HDFC_REDIRECT = 'com.alphaseeker.india://auth/callback';
 
+const getSyncErrorMessage = (error) => {
+    if (!error?.response) {
+        return "Unable to reach backend. Check network connectivity.";
+    }
+
+    const { status, data } = error.response;
+    if (typeof data === 'string' && data.trim()) {
+        return data;
+    }
+    if (typeof data?.detail === 'string' && data.detail.trim()) {
+        return data.detail;
+    }
+    if (typeof data?.error === 'string' && data.error.trim()) {
+        return data.error;
+    }
+    if (typeof data?.message === 'string' && data.message.trim()) {
+        return data.message;
+    }
+
+    return `HDFC sync failed (${status})`;
+};
+
 const Portfolio = () => {
     const [portfolio, setPortfolio] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -87,40 +109,41 @@ const Portfolio = () => {
             await loadPortfolio();
             alert("Portfolio synced successfully with HDFC!");
         } catch (error) {
-            console.error("Sync failed:", error);
+            const syncErrorMessage = getSyncErrorMessage(error);
+            console.error("Sync failed:", syncErrorMessage, error);
 
-            const confirmLogin = window.confirm("HDFC Sync failed. Do you want to login to HDFC InvestRight to authorize account access?");
-            if (confirmLogin) {
-                const redirectUri = Capacitor.isNativePlatform() ? MOBILE_HDFC_REDIRECT : null;
-                const loginUrl = await getHDFCLoginUrl(redirectUri);
-                if (loginUrl) {
-                    try {
-                        // Use Capacitor Browser plugin to open in-app browser
-                        // This keeps the main app alive so session is preserved
-                        const { Browser } = await import('@capacitor/browser');
-                        
-                        // Listen for browser close - then try sync again
-                        const listener = await Browser.addListener('browserFinished', async () => {
-                            listener.remove();
-                            try {
-                                await syncHDFCPortfolio();
-                                await loadPortfolio();
-                                alert("Portfolio synced successfully with HDFC!");
-                            } catch (syncErr) {
-                                console.log("Post-login sync attempt:", syncErr);
-                                alert("Login completed. If sync didn't work, please tap 'Sync HDFC' again.");
-                            }
-                        });
+            const needsAuthorization = /authorization|expired|token|unauthoriz|login/i.test(syncErrorMessage);
+            if (!needsAuthorization) {
+                alert(`HDFC sync failed: ${syncErrorMessage}`);
+                return;
+            }
 
-                        await Browser.open({ url: loginUrl });
-                    } catch (browserErr) {
-                        // Fallback for web: open in new tab instead of navigating away
-                        console.log("Browser plugin not available, opening in new tab", browserErr);
-                        window.open(loginUrl, '_blank');
+            const confirmLogin = window.confirm(
+                `HDFC Sync requires re-authorization.\n\nReason: ${syncErrorMessage}\n\nDo you want to login to HDFC InvestRight now?`
+            );
+            if (!confirmLogin) {
+                return;
+            }
+
+            const redirectUri = Capacitor.isNativePlatform() ? MOBILE_HDFC_REDIRECT : null;
+            const loginUrl = await getHDFCLoginUrl(redirectUri);
+            if (loginUrl) {
+                try {
+                    // Use Capacitor Browser plugin to open in-app browser
+                    // This keeps the main app alive so session is preserved
+                    const { Browser } = await import('@capacitor/browser');
+
+                    await Browser.open({ url: loginUrl });
+                    if (Capacitor.isNativePlatform()) {
+                        alert("Complete HDFC login and return to app. Sync continues automatically after callback.");
                     }
-                } else {
-                    alert("Could not get login URL from backend.");
+                } catch (browserErr) {
+                    // Fallback for web: open in new tab instead of navigating away
+                    console.log("Browser plugin not available, opening in new tab", browserErr);
+                    window.open(loginUrl, '_blank');
                 }
+            } else {
+                alert("Could not get login URL from backend.");
             }
         } finally {
             setIsSyncing(false);

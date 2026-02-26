@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from passlib.context import CryptContext
@@ -49,14 +49,21 @@ class AuthEngine:
         return pwd_context.hash(password)
 
     def create_user(self, db, email, password):
+        normalized_email = (email or "").strip().lower()
         hashed_password = self.get_password_hash(password)
-        db_user = User(email=email, hashed_password=hashed_password)
+        db_user = User(email=normalized_email, hashed_password=hashed_password)
         db.add(db_user)
         db.commit()
         db.refresh(db_user)
         return db_user
 
     def get_user_by_email(self, db, email):
-        return db.query(User).filter(User.email == email).first()
+        normalized_email = (email or "").strip().lower()
+        return (
+            db.query(User)
+            .filter(func.lower(User.email) == normalized_email)
+            .order_by(User.id.desc())
+            .first()
+        )
 
 auth_engine = AuthEngine()

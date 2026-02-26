@@ -1,22 +1,29 @@
-import React, { useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { StatusBar, Style } from '@capacitor/status-bar';
+import { Capacitor } from '@capacitor/core';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import Discovery from './pages/Discovery';
 import Portfolio from './pages/Portfolio';
 import Login from './pages/Login';
+import { restoreAuth } from './services/authStorage';
+import api from './services/api';
 
 // Auth Guard Component
 const ProtectedRoute = ({ children }) => {
+  const location = useLocation();
   const token = localStorage.getItem('token');
   if (!token) {
-    return <Navigate to="/login" replace />;
+    const search = location?.search || '';
+    return <Navigate to={`/login${search}`} replace />;
   }
   return children;
 };
 
 function App() {
+  const [authReady, setAuthReady] = useState(false);
+
   useEffect(() => {
     // Customize Status Bar for iOS
     const configureStatusBar = async () => {
@@ -30,6 +37,26 @@ function App() {
     };
     configureStatusBar();
   }, []);
+
+  useEffect(() => {
+    const hydrateAuth = async () => {
+      let restored = await restoreAuth();
+      if (!restored.token && Capacitor.isNativePlatform()) {
+        // On some iOS cold starts, Preferences can lag by a few ms.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        restored = await restoreAuth();
+      }
+      if (restored.token) {
+        api.defaults.headers.common['Authorization'] = `Bearer ${restored.token}`;
+      }
+      setAuthReady(true);
+    };
+    hydrateAuth();
+  }, []);
+
+  if (!authReady) {
+    return null;
+  }
 
   return (
     <Router>

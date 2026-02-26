@@ -1,6 +1,12 @@
 import React, { useEffect } from 'react';
 import { Link, useLocation, useNavigate, Outlet } from 'react-router-dom';
 import { handleHDFCCallback, syncHDFCPortfolio } from '../services/api';
+import { clearAuth } from '../services/authStorage';
+import {
+    consumePendingHdfcCallback,
+    hasHdfcCallbackParams,
+    persistPendingHdfcCallback,
+} from '../services/hdfcCallbackStorage';
 import { LayoutDashboard, Telescope, PieChart, LogOut } from 'lucide-react';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Capacitor, registerPlugin } from '@capacitor/core';
@@ -23,16 +29,19 @@ const Layout = ({ children }) => {
     useEffect(() => {
         const handleHDFCResult = async (params, clearWebQuery = false) => {
             const requestToken = params.get('requestToken') || params.get('request_token');
+            const oauthCode = params.get('code');
             const status = params.get('hdfc_status');
             const error = params.get('error');
 
-            if (!requestToken && !status) {
+            if (!requestToken && !oauthCode && !status) {
                 return;
             }
 
             try {
                 if (requestToken) {
-                    await handleHDFCCallback(requestToken);
+                    await handleHDFCCallback(requestToken, 'request_token');
+                } else if (oauthCode) {
+                    await handleHDFCCallback(oauthCode, 'code');
                 }
 
                 if (status === 'error') {
@@ -55,6 +64,12 @@ const Layout = ({ children }) => {
         const currentParams = new URLSearchParams(location.search);
         handleHDFCResult(currentParams, true);
 
+        // Cold-start fallback: process callback captured while login route was active.
+        const pendingParams = consumePendingHdfcCallback();
+        if (pendingParams && hasHdfcCallbackParams(pendingParams)) {
+            handleHDFCResult(pendingParams, false);
+        }
+
         // Native flow: callback opened via deep link.
         let appUrlListener;
         const registerListener = async () => {
@@ -64,13 +79,25 @@ const Layout = ({ children }) => {
                 }
 
                 appUrlListener = await AppPlugin.addListener('appUrlOpen', ({ url }) => {
-                    try {
-                        const parsedUrl = new URL(url);
-                        const deepLinkParams = new URLSearchParams(parsedUrl.search);
-                        handleHDFCResult(deepLinkParams, false);
-                    } catch (parseError) {
-                        console.error("Failed to parse deep link URL", parseError);
-                    }
+                    (async () => {
+                        try {
+                            const { Browser } = await import('@capacitor/browser');
+                            await Browser.close();
+                        } catch {
+                            // Browser may already be closed.
+                        }
+
+                        try {
+                            const parsedUrl = new URL(url);
+                            const deepLinkParams = new URLSearchParams(parsedUrl.search);
+                            if (hasHdfcCallbackParams(deepLinkParams)) {
+                                persistPendingHdfcCallback(deepLinkParams);
+                            }
+                            handleHDFCResult(deepLinkParams, false);
+                        } catch (parseError) {
+                            console.error("Failed to parse deep link URL", parseError);
+                        }
+                    })();
                 });
             } catch (listenerError) {
                 console.log("App URL listener unavailable", listenerError);
@@ -88,10 +115,9 @@ const Layout = ({ children }) => {
 
     const isActive = (path) => location.pathname === path ? 'active' : '';
 
-    const handleLogout = () => {
+    const handleLogout = async () => {
         if (window.confirm("Are you sure you want to sign out?")) {
-            localStorage.removeItem('token');
-            localStorage.removeItem('userEmail');
+            await clearAuth();
             navigate('/login');
         }
     };

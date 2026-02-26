@@ -148,6 +148,29 @@ class PortfolioEngine:
         except:
             return 0.0
 
+    def _parse_date(self, raw_value):
+        if raw_value is None:
+            return None
+
+        value = str(raw_value).strip()
+        if not value:
+            return None
+
+        for fmt in ["%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d"]:
+            try:
+                return pd.Timestamp(datetime.strptime(value, fmt))
+            except ValueError:
+                continue
+
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+
+        if isinstance(parsed, pd.Timestamp) and parsed.tzinfo is not None:
+            return parsed.tz_convert("UTC").tz_localize(None)
+
+        return pd.Timestamp(parsed)
+
     def get_portfolio(self, user_email):
         """
         Returns portfolio with live metrics for specific user.
@@ -258,20 +281,10 @@ class PortfolioEngine:
         tickers = list(set([t['ticker'] for t in user_trades]))
         
         parsed_dates = []
-        for t in user_trades:
-            d_str = t.get('buy_date')
-            if not d_str: continue
-            
-            p_date = None
-            for fmt in ["%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d"]:
-                try:
-                    p_date = datetime.strptime(d_str, fmt)
-                    break
-                except ValueError:
-                    continue
-            
-            if p_date:
-                parsed_dates.append(p_date)
+        for trade in user_trades:
+            parsed = self._parse_date(trade.get("buy_date"))
+            if parsed is not None:
+                parsed_dates.append(parsed.to_pydatetime())
         
         if not parsed_dates:
              return {"dates": [], "portfolio_value": [], "invested_value": []}
@@ -290,6 +303,19 @@ class PortfolioEngine:
         except Exception as e:
             return {"dates": [], "portfolio_value": [], "invested_value": []}
 
+        if data is None or data.empty:
+            return {"dates": [], "portfolio_value": [], "invested_value": []}
+
+        if not isinstance(data.index, pd.DatetimeIndex):
+            data.index = pd.to_datetime(data.index, errors="coerce")
+            data = data[~data.index.isna()]
+
+        if data.empty:
+            return {"dates": [], "portfolio_value": [], "invested_value": []}
+
+        if isinstance(data.index, pd.DatetimeIndex) and data.index.tz is not None:
+            data.index = data.index.tz_convert("UTC").tz_localize(None)
+
         data = data.resample('D').ffill()
         history_dates = data.index
         total_value_series = pd.Series(0.0, index=history_dates)
@@ -299,17 +325,12 @@ class PortfolioEngine:
             ticker = trade['ticker']
             qty = float(trade['quantity'])
             buy_price = float(trade['buy_price'])
-            
-            d_str = trade.get('buy_date', '')
-            buy_date_ts = pd.Timestamp.now()
-            for fmt in ["%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d"]:
-                try:
-                    buy_date_ts = pd.Timestamp(datetime.strptime(d_str, fmt))
-                    break
-                except ValueError:
-                    continue
-            
-            invested_series.loc[buy_date_ts:] += (buy_price * qty)
+
+            buy_date_ts = self._parse_date(trade.get('buy_date'))
+            if buy_date_ts is None:
+                buy_date_ts = pd.Timestamp(earliest_date)
+
+            invested_series.loc[invested_series.index >= buy_date_ts] += (buy_price * qty)
             
             price_series = None
             if isinstance(data, pd.Series):
@@ -318,7 +339,7 @@ class PortfolioEngine:
                  price_series = data[ticker]
             
             if price_series is not None:
-                 price_series = price_series.fillna(method='ffill').fillna(0)
+                 price_series = price_series.ffill().fillna(0)
                  val_contrib = price_series * qty
                  val_contrib = val_contrib.where(val_contrib.index >= buy_date_ts, 0)
                  total_value_series = total_value_series.add(val_contrib, fill_value=0)

@@ -3,16 +3,19 @@ import { Capacitor } from '@capacitor/core';
 
 const resolveApiBaseUrl = () => {
     const configuredUrl = (import.meta.env.VITE_API_URL || '').trim();
-    if (configuredUrl) {
-        return configuredUrl;
-    }
-
     if (Capacitor.isNativePlatform()) {
         const nativeUrl = (import.meta.env.VITE_MOBILE_API_URL || '').trim();
         if (nativeUrl) {
             return nativeUrl;
         }
-        return 'https://alphaseeker-backend.onrender.com/api/v1';
+        if (configuredUrl) {
+            return configuredUrl;
+        }
+        return 'https://alphaseeker-backend-s3pun44lha-uc.a.run.app/api/v1';
+    }
+
+    if (configuredUrl) {
+        return configuredUrl;
     }
 
     return '/api/v1';
@@ -164,10 +167,14 @@ export const getHDFCLoginUrl = async (redirectUri = null) => {
     }
 };
 
-export const handleHDFCCallback = async (requestToken, appRedirect = null) => {
+export const handleHDFCCallback = async (
+    callbackToken,
+    tokenParam = 'request_token',
+    appRedirect = null
+) => {
     try {
         const params = new URLSearchParams();
-        params.append('request_token', requestToken);
+        params.append(tokenParam, callbackToken);
         if (appRedirect) {
             params.append('app_redirect', appRedirect);
         }

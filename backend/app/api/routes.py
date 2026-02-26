@@ -4,7 +4,7 @@ import requests
 import secrets
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional
@@ -38,6 +38,20 @@ class Token(BaseModel):
 
 class GoogleLoginRequest(BaseModel):
     id_token: str
+
+def _normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+def _resolve_app_redirect(
+    explicit_redirect: Optional[str],
+    allow_default: bool = True
+) -> Optional[str]:
+    if explicit_redirect and explicit_redirect.strip():
+        return explicit_redirect.strip()
+    if not allow_default:
+        return None
+    default_redirect = (os.getenv("HDFC_APP_REDIRECT_URI", "") or "").strip()
+    return default_redirect or None
 
 def _build_redirect_url(base_url: str, params: dict) -> str:
     """
@@ -100,19 +114,48 @@ def _verify_google_id_token(id_token: str):
 # --- Auth Routes ---
 @router.post("/auth/signup", response_model=Token)
 async def signup(user: UserCreate, db: SessionLocal = Depends(auth_engine.get_db)):
-    print(f"Signup request for: {user.email}") # Debug log
+    email = _normalize_email(user.email)
+    print(f"Signup request for: {email}") # Debug log
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
     
-    db_user = auth_engine.get_user_by_email(db, email=user.email)
+    db_user = auth_engine.get_user_by_email(db, email=email)
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    auth_engine.create_user(db, email=user.email, password=user.password)
+    auth_engine.create_user(db, email=email, password=user.password)
     print("User created in DB.")
     
     # Auto-login after signup
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.email}, expires_delta=access_token_expires
+        data={"sub": email}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@router.post("/auth/google", response_model=Token)
+async def login_google(data: GoogleLoginRequest, db: SessionLocal = Depends(auth_engine.get_db)):
+    payload, verify_error = _verify_google_id_token(data.id_token)
+    if verify_error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=verify_error
+        )
+
+    email = _normalize_email(payload.get("email", ""))
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Google token missing email"
+        )
+    user = auth_engine.get_user_by_email(db, email=email)
+    if not user:
+        # Create user on first Google login
+        auth_engine.create_user(db, email=email, password=secrets.token_urlsafe(32))
+
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": email}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -143,7 +186,8 @@ class LoginRequest(BaseModel):
 
 @router.post("/auth/login", response_model=Token)
 async def login_json(data: LoginRequest, db: SessionLocal = Depends(auth_engine.get_db)):
-    user = auth_engine.get_user_by_email(db, email=data.email)
+    email = _normalize_email(data.email)
+    user = auth_engine.get_user_by_email(db, email=email)
     
     if not user or not auth_engine.verify_password(data.password, user.hashed_password):
         raise HTTPException(
@@ -175,6 +219,7 @@ async def hdfc_login(redirect_uri: Optional[str] = None):
 
 @router.get("/auth/callback")
 async def auth_callback(
+    request: Request,
     code: Optional[str] = None, 
     request_token: Optional[str] = None,
     state: Optional[str] = None,
@@ -184,6 +229,13 @@ async def auth_callback(
     Generic callback handler for OAuth flows.
     HDFC returns 'request_token' for v1, 'code' for std oauth.
     """
+    # App-initiated callback exchanges include Authorization header and should
+    # receive JSON responses, not deep-link redirects.
+    has_auth_header = bool((request.headers.get("authorization") or "").strip())
+    resolved_app_redirect = _resolve_app_redirect(
+        app_redirect,
+        allow_default=not has_auth_header
+    )
     token = code or request_token
     
     if token:
@@ -191,32 +243,42 @@ async def auth_callback(
            result = hdfc_engine.exchange_token(token)
 
            if "error" in result:
-                if app_redirect:
-                    redirect_url = _build_redirect_url(app_redirect, {
+                if resolved_app_redirect:
+                    redirect_url = _build_redirect_url(resolved_app_redirect, {
                         "hdfc_status": "error",
                         "error": result.get("error", "Token exchange failed")
                     })
                     return RedirectResponse(url=redirect_url, status_code=302)
-                return {"message": "Token exchange failed", "details": result}
+                raise HTTPException(
+                    status_code=400,
+                    detail=result.get("error", "Token exchange failed")
+                )
 
-           if app_redirect:
-                redirect_url = _build_redirect_url(app_redirect, {
+           if resolved_app_redirect:
+                redirect_url = _build_redirect_url(resolved_app_redirect, {
                     "hdfc_status": "success"
                 })
                 return RedirectResponse(url=redirect_url, status_code=302)
 
            # If successful, we should verify the user and perhaps redirect them back to the frontend
            # For now, simplistic response
-           return {"message": "Authorization successful. You can close this window.", "access_token": result.get("access_token")}
+           return {
+               "success": True,
+               "message": "Authorization successful. You can close this window.",
+               "access_token": result.get("access_token"),
+           }
 
-    if app_redirect:
-        redirect_url = _build_redirect_url(app_redirect, {
+    if resolved_app_redirect:
+        redirect_url = _build_redirect_url(resolved_app_redirect, {
             "hdfc_status": "error",
             "error": "No code received"
         })
         return RedirectResponse(url=redirect_url, status_code=302)
 
-    return {"message": "No code received", "params": {"code": code, "request_token": request_token}}
+    raise HTTPException(
+        status_code=400,
+        detail="No code received"
+    )
 
 # --- Existing Routes ---
 @router.get("/")
@@ -298,6 +360,8 @@ async def sync_hdfc_portfolio(current_user = Depends(get_current_user)):
         result = portfolio_manager.sync_hdfc_trades(holdings, current_user.email)
         
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
