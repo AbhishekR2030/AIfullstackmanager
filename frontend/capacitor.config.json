@@ -2,6 +2,9 @@
   "appId": "com.alphaseeker.india",
   "appName": "AlphaSeeker",
   "webDir": "dist",
+  "ios": {
+    "scrollEnabled": true
+  },
   "plugins": {
     "GoogleAuth": {
       "scopes": [

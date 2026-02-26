@@ -1,5 +1,6 @@
 import UIKit
 import Capacitor
+import WebKit
 
 #if canImport(FirebaseCore)
 import FirebaseCore
@@ -9,6 +10,38 @@ import FirebaseCore
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
     var window: UIWindow?
+    private var hasLoggedScrollFix = false
+
+    private func enforceWebViewScrolling() {
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+
+        for scene in scenes {
+            for window in scene.windows {
+                if let rootView = window.rootViewController?.view {
+                    enableScrollingRecursively(in: rootView)
+                }
+            }
+        }
+    }
+
+    private func enableScrollingRecursively(in view: UIView) {
+        if let webView = view as? WKWebView {
+            let scrollView = webView.scrollView
+            scrollView.isScrollEnabled = true
+            scrollView.alwaysBounceVertical = true
+            scrollView.bounces = true
+            scrollView.panGestureRecognizer.isEnabled = true
+            if !hasLoggedScrollFix {
+                print("[ScrollFix] WKWebView scrolling forced ON")
+                hasLoggedScrollFix = true
+            }
+        }
+
+        for child in view.subviews {
+            enableScrollingRecursively(in: child)
+        }
+    }
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Override point for customization after application launch.
@@ -24,6 +57,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             print("[Firebase] clientID:", options.clientID ?? "nil")
         }
 #endif
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.enforceWebViewScrolling()
+        }
         return true
     }
 
@@ -43,6 +80,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         // Restart any tasks that were paused (or not yet started) while the application was inactive. If the application was previously in the background, optionally refresh the user interface.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.enforceWebViewScrolling()
+        }
     }
 
     func applicationWillTerminate(_ application: UIApplication) {

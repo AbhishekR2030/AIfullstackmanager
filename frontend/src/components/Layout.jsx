@@ -161,16 +161,20 @@ const Layout = ({ children }) => {
             {/* Mobile Bottom Bar */}
             <nav className="mobile-nav">
                 <Link to="/" className={`mobile-nav-item ${isActive('/')}`} onClick={handleNavClick}>
-                    <LayoutDashboard size={24} />
+                    <LayoutDashboard size={20} />
+                    <span>Dashboard</span>
                 </Link>
                 <Link to="/discovery" className={`mobile-nav-item ${isActive('/discovery')}`} onClick={handleNavClick}>
-                    <Telescope size={24} />
+                    <Telescope size={20} />
+                    <span>Discovery</span>
                 </Link>
                 <Link to="/portfolio" className={`mobile-nav-item ${isActive('/portfolio')}`} onClick={handleNavClick}>
-                    <PieChart size={24} />
+                    <PieChart size={20} />
+                    <span>Portfolio</span>
                 </Link>
-                <button className="mobile-nav-item btn-logout-mobile" onClick={handleLogout}>
-                    <LogOut size={24} />
+                <button className="mobile-nav-item btn-logout-mobile" type="button" onClick={handleLogout}>
+                    <LogOut size={20} />
+                    <span>Sign Out</span>
                 </button>
             </nav>
         </div>
