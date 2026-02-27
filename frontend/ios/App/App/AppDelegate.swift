@@ -29,11 +29,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         if let webView = view as? WKWebView {
             let scrollView = webView.scrollView
             scrollView.isScrollEnabled = true
-            scrollView.alwaysBounceVertical = true
-            scrollView.bounces = true
+            // Disable bounce to avoid empty gap above first content row.
+            scrollView.alwaysBounceVertical = false
+            scrollView.bounces = false
             scrollView.panGestureRecognizer.isEnabled = true
             if !hasLoggedScrollFix {
-                print("[ScrollFix] WKWebView scrolling forced ON")
+                print("[ScrollFix] WKWebView scrolling ON, bounce OFF")
                 hasLoggedScrollFix = true
             }
         }

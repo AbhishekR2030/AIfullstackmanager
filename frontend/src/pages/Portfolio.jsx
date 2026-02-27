@@ -3,6 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import { getPortfolio, addTrade, deleteTrade, searchStocks, syncHDFCPortfolio, getHDFCLoginUrl } from '../services/api';
 import {
     ArrowRight,
+    Building2,
+    CircleAlert,
+    CircleCheckBig,
+    CircleDashed,
+    X,
     Eye,
     EyeOff,
     Plus,
@@ -11,10 +16,35 @@ import {
     Trash2,
 } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
+import {
+    emitPortfolioUpdated,
+    readPortfolioCache,
+    writePortfolioCache,
+} from '../services/portfolioStore';
 import './Portfolio.css';
 
 const MOBILE_HDFC_REDIRECT = 'com.alphaseeker.india://auth/callback';
 const HOLDING_SEGMENTS = ['Holdings', 'MTF', 'Mutual Fund', 'Others'];
+const CONNECTORS = [
+    {
+        id: 'hdfc',
+        name: 'HDFC InvestRight',
+        subtitle: 'Active connector',
+        status: 'active',
+    },
+    {
+        id: 'paytm-money',
+        name: 'Paytm Money',
+        subtitle: 'Coming soon',
+        status: 'coming-soon',
+    },
+    {
+        id: 'zerodha-kite',
+        name: 'Zerodha Kite',
+        subtitle: 'Coming soon',
+        status: 'coming-soon',
+    },
+];
 
 const formatCurrency = (value, decimals = 2) => {
     const numericValue = Number(value ?? 0);
@@ -62,7 +92,9 @@ const Portfolio = () => {
     const [portfolio, setPortfolio] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showAddModal, setShowAddModal] = useState(false);
+    const [showSyncModal, setShowSyncModal] = useState(false);
     const [isSyncing, setIsSyncing] = useState(false);
+    const [syncNotice, setSyncNotice] = useState(null);
     const [showValues, setShowValues] = useState(true);
     const [activeSegment, setActiveSegment] = useState('Holdings');
     const [showTodaysPl, setShowTodaysPl] = useState(false);
@@ -82,18 +114,62 @@ const Portfolio = () => {
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     useEffect(() => {
+        const cached = readPortfolioCache();
+        if (cached.items.length > 0) {
+            setPortfolio(cached.items);
+            setLoading(false);
+            loadPortfolio({ background: true });
+            return;
+        }
         loadPortfolio();
     }, []);
 
-    const loadPortfolio = async () => {
-        setLoading(true);
+    useEffect(() => {
+        document.documentElement.classList.add('portfolio-theme');
+        document.body.classList.add('portfolio-theme');
+        return () => {
+            document.documentElement.classList.remove('portfolio-theme');
+            document.body.classList.remove('portfolio-theme');
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!syncNotice) {
+            return undefined;
+        }
+
+        const timeoutId = window.setTimeout(() => {
+            setSyncNotice(null);
+        }, 5000);
+
+        return () => {
+            window.clearTimeout(timeoutId);
+        };
+    }, [syncNotice]);
+
+    const showNotice = (tone, message) => {
+        setSyncNotice({
+            tone,
+            message,
+            id: Date.now(),
+        });
+    };
+
+    const loadPortfolio = async ({ background = false } = {}) => {
+        if (!background) {
+            setLoading(true);
+        }
         try {
             const data = await getPortfolio();
             setPortfolio(data);
+            writePortfolioCache(data);
+            emitPortfolioUpdated(data);
         } catch (error) {
             console.error(error);
         } finally {
-            setLoading(false);
+            if (!background) {
+                setLoading(false);
+            }
         }
     };
 
@@ -125,62 +201,79 @@ const Portfolio = () => {
 
     const handleDelete = async (ticker) => {
         if (window.confirm(`Are you sure you want to remove ${ticker}?`)) {
+            const previousPortfolio = [...portfolio];
+            const optimisticPortfolio = previousPortfolio.filter((item) => item.ticker !== ticker);
+            setPortfolio(optimisticPortfolio);
+            writePortfolioCache(optimisticPortfolio);
+            emitPortfolioUpdated(optimisticPortfolio);
             try {
                 await deleteTrade(ticker);
-                loadPortfolio();
+                loadPortfolio({ background: true });
             } catch {
-                alert("Failed to delete trade");
+                setPortfolio(previousPortfolio);
+                writePortfolioCache(previousPortfolio);
+                emitPortfolioUpdated(previousPortfolio);
+                showNotice('error', "Failed to delete trade.");
             }
+        }
+    };
+
+    const startHdfcAuthorization = async () => {
+        const redirectUri = Capacitor.isNativePlatform() ? MOBILE_HDFC_REDIRECT : null;
+        const loginUrl = await getHDFCLoginUrl(redirectUri);
+        if (!loginUrl) {
+            showNotice('error', "Could not get HDFC login URL from backend.");
+            return;
+        }
+
+        try {
+            const { Browser } = await import('@capacitor/browser');
+            await Browser.open({ url: loginUrl });
+            showNotice('warning', "Complete HDFC login and return to app. Sync will continue automatically.");
+        } catch (browserErr) {
+            console.log("Browser plugin not available, opening in new tab", browserErr);
+            window.open(loginUrl, '_blank');
+            showNotice('warning', "Complete HDFC login in the new tab and then come back.");
         }
     };
 
     const handleSyncHDFC = async () => {
         setIsSyncing(true);
         try {
-            // First try simple sync (assumes token exists on backend)
             await syncHDFCPortfolio();
-            await loadPortfolio();
-            alert("Portfolio synced successfully with HDFC!");
+            await loadPortfolio({ background: true });
+            showNotice('success', "Portfolio synced successfully from HDFC.");
         } catch (error) {
             const syncErrorMessage = getSyncErrorMessage(error);
+            const statusCode = error?.response?.status;
             console.error("Sync failed:", syncErrorMessage, error);
 
-            const needsAuthorization = /authorization|expired|token|unauthoriz|login/i.test(syncErrorMessage);
+            const needsAuthorization = statusCode === 401
+                || statusCode === 403
+                || /authorization|expired|token|unauthoriz|login|\b401\b|\b403\b/i.test(syncErrorMessage);
+
             if (!needsAuthorization) {
-                alert(`HDFC sync failed: ${syncErrorMessage}`);
+                showNotice('error', `HDFC sync failed: ${syncErrorMessage}`);
                 return;
             }
 
-            const confirmLogin = window.confirm(
-                `HDFC Sync requires re-authorization.\n\nReason: ${syncErrorMessage}\n\nDo you want to login to HDFC InvestRight now?`
-            );
-            if (!confirmLogin) {
-                return;
-            }
-
-            const redirectUri = Capacitor.isNativePlatform() ? MOBILE_HDFC_REDIRECT : null;
-            const loginUrl = await getHDFCLoginUrl(redirectUri);
-            if (loginUrl) {
-                try {
-                    // Use Capacitor Browser plugin to open in-app browser
-                    // This keeps the main app alive so session is preserved
-                    const { Browser } = await import('@capacitor/browser');
-
-                    await Browser.open({ url: loginUrl });
-                    if (Capacitor.isNativePlatform()) {
-                        alert("Complete HDFC login and return to app. Sync continues automatically after callback.");
-                    }
-                } catch (browserErr) {
-                    // Fallback for web: open in new tab instead of navigating away
-                    console.log("Browser plugin not available, opening in new tab", browserErr);
-                    window.open(loginUrl, '_blank');
-                }
-            } else {
-                alert("Could not get login URL from backend.");
-            }
+            showNotice('warning', "HDFC session expired. Re-authorizing now.");
+            await startHdfcAuthorization();
         } finally {
             setIsSyncing(false);
         }
+    };
+
+    const handleConnectorSync = async (connectorId) => {
+        if (connectorId === 'hdfc') {
+            setShowSyncModal(false);
+            await handleSyncHDFC();
+            return;
+        }
+
+        setShowSyncModal(false);
+        const connector = CONNECTORS.find((item) => item.id === connectorId);
+        showNotice('info', `${connector?.name || 'Connector'} integration will be available soon.`);
     };
 
     const handleAddTrade = async (e) => {
@@ -205,9 +298,9 @@ const Portfolio = () => {
             await addTrade(formattedTrade);
             setShowAddModal(false);
             setNewTrade({ ticker: '', buy_date: '', buy_price: '', quantity: '' });
-            loadPortfolio();
+            loadPortfolio({ background: true });
         } catch {
-            alert("Failed to add trade");
+            showNotice('error', "Failed to add trade.");
         } finally {
             setIsSubmitting(false);
         }
@@ -281,6 +374,26 @@ const Portfolio = () => {
 
             {isHoldingView ? (
                 <>
+                    {syncNotice ? (
+                        <div className={`sync-notice ${syncNotice.tone}`} key={syncNotice.id}>
+                            <div className="sync-notice-icon">
+                                {syncNotice.tone === 'success' ? <CircleCheckBig size={16} /> : null}
+                                {syncNotice.tone === 'error' ? <CircleAlert size={16} /> : null}
+                                {syncNotice.tone === 'warning' ? <CircleAlert size={16} /> : null}
+                                {syncNotice.tone === 'info' ? <CircleDashed size={16} /> : null}
+                            </div>
+                            <p>{syncNotice.message}</p>
+                            <button
+                                type="button"
+                                className="sync-notice-close"
+                                onClick={() => setSyncNotice(null)}
+                                aria-label="Dismiss message"
+                            >
+                                <X size={14} />
+                            </button>
+                        </div>
+                    ) : null}
+
                     <div className="portfolio-overview-card">
                         <div className="pl-toggle-row">
                             <span className={!showTodaysPl ? 'active' : ''}>Total</span>
@@ -333,17 +446,17 @@ const Portfolio = () => {
                         <div className="movers-grid">
                             <div className="mover-column">
                                 <span className="mover-tag gain">TOP GAINER</span>
-                                <strong>{topGainer?.ticker || '--'}</strong>
+                                <strong>{showValues ? (topGainer?.ticker || '--') : '••••••'}</strong>
                                 <span className="mover-value up">
-                                    {topGainer ? formatSignedPercent(topGainer.pl_percent) : '--'}
+                                    {showValues ? (topGainer ? formatSignedPercent(topGainer.pl_percent) : '--') : '•••'}
                                 </span>
                             </div>
                             <div className="mover-divider" />
                             <div className="mover-column">
                                 <span className="mover-tag loss">TOP LOSER</span>
-                                <strong>{topLoser?.ticker || '--'}</strong>
+                                <strong>{showValues ? (topLoser?.ticker || '--') : '••••••'}</strong>
                                 <span className="mover-value down">
-                                    {topLoser ? formatSignedPercent(topLoser.pl_percent) : '--'}
+                                    {showValues ? (topLoser ? formatSignedPercent(topLoser.pl_percent) : '--') : '•••'}
                                 </span>
                             </div>
                         </div>
@@ -370,11 +483,21 @@ const Portfolio = () => {
                                 <button
                                     className="portfolio-icon-button"
                                     type="button"
-                                    title="Sync from HDFC InvestRight"
-                                    onClick={handleSyncHDFC}
+                                    title="Sync portfolio"
+                                    onClick={() => setShowSyncModal(true)}
                                     disabled={isSyncing}
                                 >
                                     <RefreshCw size={18} className={isSyncing ? "spin-animation" : ""} />
+                                </button>
+                                <button
+                                    className={`portfolio-icon-button ${!showValues ? 'is-active' : ''}`}
+                                    type="button"
+                                    title={showValues ? "Hide portfolio details" : "Show portfolio details"}
+                                    onClick={() => setShowValues((prev) => !prev)}
+                                    aria-label={showValues ? "Hide portfolio details" : "Show portfolio details"}
+                                    aria-pressed={!showValues}
+                                >
+                                    {showValues ? <Eye size={18} /> : <EyeOff size={18} />}
                                 </button>
                                 <button
                                     className="portfolio-icon-button"
@@ -407,36 +530,36 @@ const Portfolio = () => {
                                     return (
                                         <article className="holding-row" key={`${trade.ticker}-${index}`}>
                                             <div className="holding-meta">
-                                                <span>Qty <strong>{trade.quantity}</strong></span>
+                                                <span>Qty <strong>{showValues ? trade.quantity : '•••'}</strong></span>
                                                 <span className="meta-separator" />
-                                                <span>Avg <strong>{formatCurrency(trade.buy_price, 2)}</strong></span>
+                                                <span>Avg <strong>{showValues ? formatCurrency(trade.buy_price, 2) : '••••••'}</strong></span>
                                             </div>
                                             <div className="holding-main">
                                                 <div className="holding-title-wrap">
-                                                    <h3>{trade.company_name || trade.ticker}</h3>
-                                                    {trade.company_name ? <p>{trade.ticker}</p> : null}
+                                                    <h3>{showValues ? (trade.company_name || trade.ticker) : 'Hidden Stock'}</h3>
+                                                    {showValues && trade.company_name ? <p>{trade.ticker}</p> : null}
                                                 </div>
                                                 <div className="holding-ltp">
-                                                    <span>LTP {formatCurrency(trade.current_price, 2)}</span>
+                                                    <span>LTP {showValues ? formatCurrency(trade.current_price, 2) : '••••••'}</span>
                                                     <small className={ltpDelta >= 0 ? 'up' : 'down'}>
-                                                        {formatSignedCurrency(ltpDelta, 2)} ({formatSignedPercent(ltpDeltaPct)})
+                                                        {showValues ? `${formatSignedCurrency(ltpDelta, 2)} (${formatSignedPercent(ltpDeltaPct)})` : '••••••'}
                                                     </small>
                                                 </div>
                                             </div>
                                             <div className="holding-foot">
                                                 <div>
                                                     <span>Current</span>
-                                                    <strong>{formatCurrency(currentValue, 2)}</strong>
+                                                    <strong>{showValues ? formatCurrency(currentValue, 2) : '••••••'}</strong>
                                                 </div>
                                                 <div>
                                                     <span>P/L</span>
                                                     <strong className={plAmount >= 0 ? 'up' : 'down'}>
-                                                        {formatSignedCurrency(plAmount, 2)} ({formatSignedPercent(trade.pl_percent)})
+                                                        {showValues ? `${formatSignedCurrency(plAmount, 2)} (${formatSignedPercent(trade.pl_percent)})` : '••••••'}
                                                     </strong>
                                                 </div>
                                                 <div>
                                                     <span>Invested</span>
-                                                    <strong>{formatCurrency(investedValue, 2)}</strong>
+                                                    <strong>{showValues ? formatCurrency(investedValue, 2) : '••••••'}</strong>
                                                 </div>
                                             </div>
                                             <button
@@ -459,6 +582,42 @@ const Portfolio = () => {
                 <div className="coming-soon-card">
                     <h3>{activeSegment}</h3>
                     <p>This bucket is not connected yet. Holdings data is available under the Holdings tab.</p>
+                </div>
+            )}
+
+            {showSyncModal && (
+                <div className="modal-overlay" onClick={() => setShowSyncModal(false)}>
+                    <div className="sync-modal" onClick={(event) => event.stopPropagation()}>
+                        <div className="sync-modal-head">
+                            <h3>Sync Portfolio</h3>
+                            <p>Select a broker connector.</p>
+                        </div>
+                        <div className="connector-list">
+                            {CONNECTORS.map((connector) => {
+                                const isActive = connector.status === 'active';
+                                return (
+                                    <button
+                                        key={connector.id}
+                                        type="button"
+                                        className={`connector-row ${isActive ? 'active' : 'coming-soon'}`}
+                                        onClick={() => handleConnectorSync(connector.id)}
+                                        disabled={isSyncing}
+                                    >
+                                        <div className="connector-main">
+                                            <Building2 size={17} />
+                                            <div>
+                                                <strong>{connector.name}</strong>
+                                                <span>{connector.subtitle}</span>
+                                            </div>
+                                        </div>
+                                        <span className={`connector-state ${isActive ? 'active' : 'soon'}`}>
+                                            {isActive ? 'Connected' : 'Coming soon'}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
                 </div>
             )}
 

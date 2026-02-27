@@ -354,7 +354,21 @@ async def sync_hdfc_portfolio(current_user = Depends(get_current_user)):
         holdings = hdfc_engine.fetch_holdings()
         
         if isinstance(holdings, dict) and "error" in holdings:
-             raise HTTPException(status_code=400, detail=holdings["error"])
+             error_detail = str(holdings["error"] or "").strip() or "HDFC sync failed"
+             normalized_error = error_detail.lower()
+             auth_failure = (
+                 "401" in normalized_error
+                 or "403" in normalized_error
+                 or "unauthoriz" in normalized_error
+                 or "expired" in normalized_error
+                 or "missing" in normalized_error
+                 or "login" in normalized_error
+                 or "token" in normalized_error
+             )
+             raise HTTPException(
+                 status_code=status.HTTP_401_UNAUTHORIZED if auth_failure else status.HTTP_400_BAD_REQUEST,
+                 detail=error_detail
+             )
              
         # 2. Update Portfolio Engine
         result = portfolio_manager.sync_hdfc_trades(holdings, current_user.email)
