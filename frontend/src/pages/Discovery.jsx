@@ -1,24 +1,235 @@
-import React, { useState } from 'react';
-import { fetchDiscoveryScan, triggerAsyncDiscoveryScan, getAsyncDiscoveryStatus, getAsyncDiscoveryResults } from '../services/api';
-import StockCard from '../components/StockCard';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+    fetchDiscoveryScan,
+    triggerAsyncDiscoveryScan,
+    getAsyncDiscoveryStatus,
+    getAsyncDiscoveryResults,
+} from '../services/api';
 import ThresholdsModal, { DEFAULT_THRESHOLDS } from '../components/ThresholdsModal';
-import { RefreshCw, ArrowRight, TrendingUp, AlertTriangle, CheckCircle, Settings } from 'lucide-react';
+import {
+    upsertWatchlistItem,
+    removeWatchlistItem,
+    readWatchlist,
+    WATCHLIST_UPDATED_EVENT,
+} from '../services/watchlistStore';
+import {
+    ArrowRightLeft,
+    Check,
+    CheckCircle2,
+    ChevronDown,
+    ChevronUp,
+    CircleAlert,
+    Info,
+    Plus,
+    RefreshCw,
+    Settings,
+    Sparkles,
+    Target,
+    TrendingUp,
+} from 'lucide-react';
 import './Discovery.css';
 
-// localStorage keys for persistent data
 const THRESHOLDS_STORAGE_KEY = 'alphaseeker_discovery_thresholds';
-const SCAN_RESULTS_STORAGE_KEY = 'alphaseeker_discovery_results';
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const DISCOVERY_STATE_STORAGE_KEY = 'alphaseeker_discovery_state';
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const STRATEGY_PRESETS = [
+    {
+        id: 'custom',
+        label: 'Custom Trade',
+        description: 'Use your own thresholds and scan logic.',
+        details: [
+            'Define your RSI, volatility, volume-shock, and fundamentals limits.',
+            'Scanner applies your thresholds to identify liquid momentum candidates.',
+            'Best for experimenting with your own entry/exit discipline.',
+        ],
+        thresholds: null,
+    },
+    {
+        id: 'citadel_momentum',
+        label: 'Citadel Momentum',
+        description: 'High-liquidity momentum and quality tilt.',
+        details: [
+            'Focuses on strong trend continuation with strict liquidity filters.',
+            'Balances momentum and quality to avoid weak balance-sheet breakouts.',
+            'Designed for fast rotation into high-conviction, high-volume setups.',
+        ],
+        thresholds: {
+            technical: { rsi_min: 53, rsi_max: 68, volatility_min: 3, volatility_max: 9, volume_shock_min: 1.6, volume_shock_max: 6.0 },
+            fundamental: { revenue_growth_min: 8, revenue_growth_max: 120, profit_growth_min: 8, profit_growth_max: 120, roe_min: 14, roe_max: 100, roce_min: 14, roce_max: 100, debt_equity_min: 0, debt_equity_max: 120 },
+        },
+    },
+    {
+        id: 'janestreet_quant',
+        label: 'Jane Street',
+        description: 'Short-term flow and mean-reversion blend.',
+        details: [
+            'Combines flow-based momentum with mean-reversion risk checks.',
+            'Allows wider RSI/volatility bands to capture tactical dislocations.',
+            'Targets opportunities where short-term pricing inefficiency can normalize.',
+        ],
+        thresholds: {
+            technical: { rsi_min: 38, rsi_max: 62, volatility_min: 2, volatility_max: 11, volume_shock_min: 1.2, volume_shock_max: 8.0 },
+            fundamental: { revenue_growth_min: 0, revenue_growth_max: 150, profit_growth_min: 0, profit_growth_max: 150, roe_min: 8, roe_max: 100, roce_min: 8, roce_max: 100, debt_equity_min: 0, debt_equity_max: 200 },
+        },
+    },
+    {
+        id: 'deshaw_quality',
+        label: 'DE Shaw Quality',
+        description: 'Profitability and balance-sheet driven screen.',
+        details: [
+            'Prioritizes stronger ROE/ROCE and cleaner leverage profile.',
+            'Filters out low-quality spikes that fail fundamental discipline.',
+            'Useful for high-quality swing allocations.',
+        ],
+        thresholds: {
+            technical: { rsi_min: 48, rsi_max: 66, volatility_min: 2.5, volatility_max: 8, volume_shock_min: 1.4, volume_shock_max: 5.0 },
+            fundamental: { revenue_growth_min: 12, revenue_growth_max: 150, profit_growth_min: 12, profit_growth_max: 150, roe_min: 16, roe_max: 100, roce_min: 16, roce_max: 100, debt_equity_min: 0, debt_equity_max: 80 },
+        },
+    },
+];
+
+const STRATEGY_LOOKUP = STRATEGY_PRESETS.reduce((acc, strategy) => {
+    acc[strategy.id] = strategy;
+    return acc;
+}, {});
+
+const safeParse = (raw, fallback) => {
+    if (!raw) {
+        return fallback;
+    }
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return fallback;
+    }
+};
+
+const normalizeTicker = (ticker) => (ticker || '').trim().toUpperCase();
+
+const currency = (value) => {
+    const numeric = Number(value || 0);
+    return `₹${numeric.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+};
+
+const percentSigned = (value) => {
+    const numeric = Number(value || 0);
+    return `${numeric >= 0 ? '+' : ''}${numeric.toFixed(2)}%`;
+};
+
+const isDefaultThresholds = (thresholds) => JSON.stringify(thresholds) === JSON.stringify(DEFAULT_THRESHOLDS);
+
+const getEffectiveThresholds = (strategyId, customThresholds) => {
+    if (strategyId === 'custom') {
+        return customThresholds;
+    }
+    return STRATEGY_LOOKUP[strategyId]?.thresholds || customThresholds;
+};
+
+const rsiZoneFromScore = (score) => {
+    const numeric = Number(score || 0);
+    if (numeric >= 68) {
+        return 'Momentum indicates RSI zone likely near 70 (overbought risk).';
+    }
+    if (numeric <= 42) {
+        return 'Momentum indicates RSI zone likely below 40 (weak trend risk).';
+    }
+    return 'Momentum zone is neutral; monitor RSI for trend break signals.';
+};
+
+const buildReplacementRanking = (scanData, ideas) => {
+    const swaps = Array.isArray(scanData?.swap_opportunities) ? scanData.swap_opportunities : [];
+    const portfolio = Array.isArray(scanData?.portfolio_analysis) ? scanData.portfolio_analysis : [];
+    const ideaMap = new Map(ideas.map((idea) => [idea.ticker, idea]));
+
+    const buildSignals = (asset, baseReason) => {
+        const signals = [];
+        const plPercent = Number(asset?.pl_percent || 0);
+        if (plPercent >= 20) {
+            signals.push(`Stock has already yielded ${plPercent.toFixed(1)}% upside.`);
+        }
+        signals.push(rsiZoneFromScore(asset?.score));
+        if ((asset?.trend || '').toLowerCase().includes('bearish')) {
+            signals.push('Price trend has turned bearish below key moving averages.');
+        }
+        if (baseReason) {
+            signals.push(baseReason);
+        }
+        signals.push('Recent price reaction can indicate negative announcement risk. Verify latest company updates before holding.');
+        return signals;
+    };
+
+    if (swaps.length > 0) {
+        return swaps.slice(0, 6).map((swap, index) => {
+            const fromTicker = normalizeTicker(swap.sell);
+            const toTicker = normalizeTicker(swap.buy) || ideas[0]?.ticker || 'N/A';
+            const sellAsset = portfolio.find((asset) => normalizeTicker(asset.ticker) === fromTicker) || {};
+            const buyIdea = ideaMap.get(toTicker) || ideas[0] || null;
+            return {
+                rank: Number(swap.priority || index + 1),
+                fromTicker,
+                toTicker,
+                switchReason: swap.reason || 'Engine suggests rotating into stronger momentum.',
+                signals: buildSignals(sellAsset, swap.reason),
+                targetPrice: buyIdea?.targetPrice || 0,
+                expectedReturn: buyIdea?.expectedReturn || 0,
+            };
+        });
+    }
+
+    const rankedPortfolio = portfolio
+        .map((asset) => {
+            const plPercent = Number(asset.pl_percent || 0);
+            const recommendation = (asset.recommendation || '').toUpperCase();
+            let rankScore = 0;
+            if (recommendation.includes('SELL')) {
+                rankScore += 4;
+            }
+            if (plPercent >= 20) {
+                rankScore += 3;
+            }
+            if ((asset.trend || '').toLowerCase().includes('bearish')) {
+                rankScore += 2;
+            }
+            rankScore += Number(asset.score || 0) >= 68 || Number(asset.score || 0) <= 42 ? 1 : 0;
+
+            return {
+                ...asset,
+                rankScore,
+            };
+        })
+        .sort((a, b) => b.rankScore - a.rankScore)
+        .slice(0, 6);
+
+    return rankedPortfolio.map((asset, index) => {
+        const buyIdea = ideas[index % Math.max(ideas.length, 1)] || null;
+        return {
+            rank: index + 1,
+            fromTicker: normalizeTicker(asset.ticker),
+            toTicker: buyIdea?.ticker || 'TBD',
+            switchReason: asset.reason || 'Relative strength is weakening versus current scan opportunities.',
+            signals: buildSignals(asset, asset.reason),
+            targetPrice: buyIdea?.targetPrice || 0,
+            expectedReturn: buyIdea?.expectedReturn || 0,
+        };
+    });
+};
 
 const Discovery = () => {
-    // Load scan results from localStorage on mount
+    const [thresholds, setThresholds] = useState(() => {
+        const saved = safeParse(localStorage.getItem(THRESHOLDS_STORAGE_KEY), null);
+        return saved || DEFAULT_THRESHOLDS;
+    });
+
+    const [activeStrategy, setActiveStrategy] = useState(() => {
+        const saved = safeParse(localStorage.getItem(DISCOVERY_STATE_STORAGE_KEY), null);
+        return saved?.strategyId || 'custom';
+    });
+
     const [scanData, setScanData] = useState(() => {
-        try {
-            const saved = localStorage.getItem(SCAN_RESULTS_STORAGE_KEY);
-            return saved ? JSON.parse(saved) : null;
-        } catch {
-            return null;
-        }
+        const saved = safeParse(localStorage.getItem(DISCOVERY_STATE_STORAGE_KEY), null);
+        return saved?.data || null;
     });
 
     const [loading, setLoading] = useState(false);
@@ -26,77 +237,145 @@ const Discovery = () => {
     const [showThresholds, setShowThresholds] = useState(false);
     const [thresholdModalKey, setThresholdModalKey] = useState(0);
     const [scanProgress, setScanProgress] = useState({ percent: 0, message: '' });
-
-    // Load thresholds from localStorage on mount
-    const [thresholds, setThresholds] = useState(() => {
-        try {
-            const saved = localStorage.getItem(THRESHOLDS_STORAGE_KEY);
-            return saved ? JSON.parse(saved) : DEFAULT_THRESHOLDS;
-        } catch {
-            return DEFAULT_THRESHOLDS;
-        }
+    const [watchlistTickers, setWatchlistTickers] = useState(() => {
+        return new Set(readWatchlist().map((item) => normalizeTicker(item.ticker)));
     });
+    const [expandedReplacements, setExpandedReplacements] = useState({});
 
-    const loadData = async (customThresholds = thresholds) => {
+    const activeStrategyConfig = STRATEGY_LOOKUP[activeStrategy] || STRATEGY_LOOKUP.custom;
+
+    useEffect(() => {
+        document.documentElement.classList.add('discovery-theme');
+        document.body.classList.add('discovery-theme');
+        return () => {
+            document.documentElement.classList.remove('discovery-theme');
+            document.body.classList.remove('discovery-theme');
+        };
+    }, []);
+
+    const syncWatchlist = useCallback(() => {
+        setWatchlistTickers(new Set(readWatchlist().map((item) => normalizeTicker(item.ticker))));
+    }, []);
+
+    useEffect(() => {
+        const handleUpdate = () => syncWatchlist();
+        window.addEventListener(WATCHLIST_UPDATED_EVENT, handleUpdate);
+        return () => window.removeEventListener(WATCHLIST_UPDATED_EVENT, handleUpdate);
+    }, [syncWatchlist]);
+
+    const persistDiscoveryState = useCallback((strategyId, data) => {
+        localStorage.setItem(
+            DISCOVERY_STATE_STORAGE_KEY,
+            JSON.stringify({
+                strategyId,
+                data,
+                updatedAt: new Date().toISOString(),
+            })
+        );
+    }, []);
+
+    const runAsyncDefaultScan = useCallback(async () => {
+        setScanProgress({ percent: 0, message: 'Initializing async scan...' });
+        const trigger = await triggerAsyncDiscoveryScan('IN');
+        const jobId = trigger?.job_id;
+        if (!jobId) {
+            throw new Error('Async scan did not return a job id');
+        }
+
+        for (let attempt = 0; attempt < 45; attempt += 1) {
+            const status = await getAsyncDiscoveryStatus(jobId);
+            setScanProgress({
+                percent: Math.max(0, status?.percent || 0),
+                message: status?.message || 'Scanning...',
+            });
+
+            if (status?.state === 'FAILURE') {
+                throw new Error(status?.error || status?.message || 'Async scan failed');
+            }
+
+            if (status?.state === 'SUCCESS' || status?.result_ready) {
+                const results = await getAsyncDiscoveryResults(jobId);
+                if (!results || !Array.isArray(results.scan_results)) {
+                    throw new Error('Async scan returned an invalid response');
+                }
+                return results;
+            }
+
+            await sleep(1500);
+        }
+
+        throw new Error('Async scan timed out');
+    }, []);
+
+    const runScan = useCallback(async (strategyId, thresholdSet) => {
+        const effectiveThresholds = getEffectiveThresholds(strategyId, thresholdSet);
+        const tryAsync = strategyId === 'custom' && isDefaultThresholds(effectiveThresholds);
+
+        if (tryAsync) {
+            try {
+                return await runAsyncDefaultScan();
+            } catch (asyncError) {
+                console.warn('Async scan failed, falling back to sync scan:', asyncError);
+                setScanProgress({ percent: 0, message: 'Async worker unavailable. Running direct scan...' });
+            }
+        }
+
+        try {
+            const syncData = await fetchDiscoveryScan(effectiveThresholds);
+            if (!syncData || !Array.isArray(syncData.scan_results)) {
+                throw new Error('Scan response is invalid');
+            }
+            return syncData;
+        } catch (syncError) {
+            const canFallbackToAsync = !tryAsync;
+            if (canFallbackToAsync) {
+                try {
+                    setScanProgress({ percent: 0, message: 'Direct scan failed. Retrying with async worker...' });
+                    return await runAsyncDefaultScan();
+                } catch {
+                    // Continue and throw original sync error.
+                }
+            }
+            throw syncError;
+        }
+    }, [runAsyncDefaultScan]);
+
+    const handleScan = useCallback(async (strategyId = activeStrategy, thresholdSet = thresholds) => {
         try {
             setLoading(true);
             setError(null);
-            setScanProgress({ percent: 0, message: 'Initializing scan...' });
+            setScanProgress({ percent: 0, message: 'Starting market scan...' });
+            setExpandedReplacements({});
 
-            // Async worker currently supports region-based scanning.
-            // Keep sync endpoint for non-default custom threshold scans.
-            const isDefaultThresholds = JSON.stringify(customThresholds) === JSON.stringify(DEFAULT_THRESHOLDS);
-            let data;
-
-            if (!isDefaultThresholds) {
-                data = await fetchDiscoveryScan(customThresholds);
-            } else {
-                const trigger = await triggerAsyncDiscoveryScan('IN');
-                const jobId = trigger.job_id;
-                let completed = false;
-
-                for (let attempt = 0; attempt < 150; attempt += 1) {
-                    const status = await getAsyncDiscoveryStatus(jobId);
-                    setScanProgress({
-                        percent: Math.max(0, status.percent || 0),
-                        message: status.message || 'Scanning...'
-                    });
-
-                    if (status.state === 'FAILURE') {
-                        throw new Error(status.error || status.message || 'Async scan failed');
-                    }
-
-                    if (status.state === 'SUCCESS' || status.result_ready) {
-                        data = await getAsyncDiscoveryResults(jobId);
-                        completed = true;
-                        break;
-                    }
-
-                    await sleep(2000);
-                }
-
-                if (!completed) {
-                    throw new Error('Scan timed out. Please try again.');
-                }
-            }
-
+            const data = await runScan(strategyId, thresholdSet);
             setScanData(data);
-            // Persist scan results to localStorage
-            localStorage.setItem(SCAN_RESULTS_STORAGE_KEY, JSON.stringify(data));
-        } catch (err) {
-            console.error("Scan error:", err);
-            setError(err?.message || "Failed to scan market. Server might be busy.");
+            persistDiscoveryState(strategyId, data);
+        } catch (scanError) {
+            console.error('Discovery scan error:', scanError);
+            setError(scanError?.message || 'Failed to scan market. Please try again.');
         } finally {
             setLoading(false);
             setScanProgress({ percent: 0, message: '' });
         }
-    };
+    }, [activeStrategy, thresholds, runScan, persistDiscoveryState]);
 
     const handleApplyThresholds = (newThresholds) => {
         setThresholds(newThresholds);
-        // Persist thresholds to localStorage
         localStorage.setItem(THRESHOLDS_STORAGE_KEY, JSON.stringify(newThresholds));
-        loadData(newThresholds);
+        setActiveStrategy('custom');
+        setError(null);
+        setScanProgress({ percent: 0, message: '' });
+        setScanData(null);
+        persistDiscoveryState('custom', null);
+    };
+
+    const handleSelectStrategy = (strategyId) => {
+        setActiveStrategy(strategyId);
+        setError(null);
+        setScanProgress({ percent: 0, message: '' });
+        setScanData(null);
+        setExpandedReplacements({});
+        persistDiscoveryState(strategyId, null);
     };
 
     const openThresholdsModal = () => {
@@ -104,34 +383,58 @@ const Discovery = () => {
         setShowThresholds(true);
     };
 
-    return (
-        <div className="discovery-page">
-            <div className="discovery-header">
-                <div>
-                    <h1>Market Opportunities</h1>
-                    <p className="text-muted">AI-Scanner: Nifty 500 Momentum, RSI & Volatility Check</p>
-                </div>
-                <div className="header-actions">
-                    <button
-                        className="btn-thresholds"
-                        onClick={openThresholdsModal}
-                        disabled={loading}
-                    >
-                        <Settings size={18} />
-                        <span>Thresholds</span>
-                    </button>
-                    <button
-                        className="btn-scan"
-                        onClick={() => loadData()}
-                        disabled={loading}
-                    >
-                        <RefreshCw size={18} className={loading ? 'spin' : ''} />
-                        <span>Scan Now</span>
-                    </button>
-                </div>
-            </div>
+    const ideas = useMemo(() => {
+        const source = Array.isArray(scanData?.scan_results) ? scanData.scan_results : [];
+        return source.map((stock) => {
+            const currentPrice = Number(stock.price || 0);
+            const upsidePotential = Number(stock.upside_potential || 0);
+            const modeledUpside = upsidePotential > 0 ? upsidePotential : Math.max((Number(stock.score || 0) - 50) / 2, 3);
+            const targetPrice = currentPrice * (1 + modeledUpside / 100);
+            return {
+                ticker: normalizeTicker(stock.ticker),
+                name: normalizeTicker(stock.ticker),
+                sector: stock.sector || 'Market Signal',
+                currentPrice,
+                targetPrice,
+                expectedReturn: modeledUpside,
+                momentum: Number(stock.momentum_score || 0),
+                score: Number(stock.score || 0),
+            };
+        });
+    }, [scanData]);
 
-            {/* Thresholds Modal */}
+    const replacementRanking = useMemo(() => buildReplacementRanking(scanData, ideas), [scanData, ideas]);
+
+    const activeStrategyLabel = activeStrategyConfig?.label || 'Custom Trade';
+
+    const toggleWatchlist = (idea) => {
+        if (watchlistTickers.has(idea.ticker)) {
+            removeWatchlistItem(idea.ticker);
+        } else {
+            upsertWatchlistItem({
+                ticker: idea.ticker,
+                name: idea.name,
+                strategy: activeStrategy,
+                source: activeStrategyLabel,
+                sector: idea.sector,
+                currentPrice: idea.currentPrice,
+                targetPrice: idea.targetPrice,
+                expectedReturn: idea.expectedReturn,
+                score: idea.score,
+                momentum: idea.momentum,
+            });
+        }
+    };
+
+    const toggleReplacementExpansion = (key) => {
+        setExpandedReplacements((prev) => ({
+            ...prev,
+            [key]: !prev[key],
+        }));
+    };
+
+    return (
+        <div className="discovery-native-page">
             <ThresholdsModal
                 key={thresholdModalKey}
                 isOpen={showThresholds}
@@ -140,83 +443,227 @@ const Discovery = () => {
                 initialThresholds={thresholds}
             />
 
-            {loading ? (
-                <div className="loading-container">
-                    <div className="spinner"></div>
-                    <p>{scanProgress.message || 'Scanning 500+ Assets & Analyzing Portfolio...'}</p>
-                    {scanProgress.percent > 0 && (
-                        <p className="text-muted">Progress: {scanProgress.percent}%</p>
-                    )}
+            <section className="discovery-tabs-card">
+                <div className="strategy-tabs" role="tablist" aria-label="Strategy tabs">
+                    {STRATEGY_PRESETS.map((strategy) => (
+                        <button
+                            key={strategy.id}
+                            type="button"
+                            role="tab"
+                            aria-selected={activeStrategy === strategy.id}
+                            className={`strategy-tab ${activeStrategy === strategy.id ? 'active' : ''}`}
+                            onClick={() => handleSelectStrategy(strategy.id)}
+                        >
+                            {strategy.label}
+                        </button>
+                    ))}
                 </div>
-            ) : error ? (
-                <div className="error-container"><p className="text-danger">{error}</p></div>
-            ) : !scanData ? (
-                <div className="empty-state">
-                    <Settings size={48} className="empty-icon" />
-                    <h3>Configure Thresholds & Scan</h3>
-                    <p>Click "Thresholds" to set your screening criteria, then "Scan Now" to find opportunities.</p>
-                </div>
-            ) : (
-                <div className="scan-results-container">
+            </section>
 
-                    {/* 1. Swap Opportunities (High Priority) with Ranking */}
-                    {scanData.swap_opportunities && scanData.swap_opportunities.length > 0 && (
-                        <div className="section-card highlight-section">
-                            <h3 className="section-title"><AlertTriangle size={20} color="#f59e0b" /> Recommendation: Sell & Reinvest</h3>
-                            <div className="swaps-grid">
-                                {scanData.swap_opportunities.map((swap, idx) => (
-                                    <div key={idx} className="swap-card">
-                                        <div className="swap-priority">#{swap.priority}</div>
-                                        <div className="swap-from">
-                                            <span className="label">SELL</span>
-                                            <span className="ticker text-danger">{swap.sell}</span>
-                                        </div>
-                                        <ArrowRight size={24} className="text-muted" />
-                                        <div className="swap-to">
-                                            <span className="label">BUY</span>
-                                            <span className="ticker text-success">{swap.buy}</span>
-                                        </div>
-                                        <p className="swap-reason">{swap.reason}</p>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* 2. Top Buy Candidates */}
-                    <div className="section-card">
-                        <h3 className="section-title"><TrendingUp size={20} color="#10b981" /> Top Buy Candidates (Nifty 500)</h3>
-                        <div className="stocks-grid">
-                            {scanData.scan_results && scanData.scan_results.map((stock) => (
-                                <StockCard key={stock.ticker} stock={stock} thresholds={thresholds} />
-                            ))}
-                        </div>
-                        {(!scanData.scan_results || scanData.scan_results.length === 0) &&
-                            <p className="text-muted">No strong buy signals found with current thresholds.</p>
-                        }
+            <section className="strategy-panel-card">
+                <div className="strategy-panel-head">
+                    <div>
+                        <h2>{activeStrategyConfig.label}</h2>
+                        <p>{activeStrategyConfig.description}</p>
                     </div>
-
-                    {/* 3. Portfolio Health */}
-                    {scanData.portfolio_analysis && scanData.portfolio_analysis.length > 0 && (
-                        <div className="section-card">
-                            <h3 className="section-title"><CheckCircle size={20} color="#3b82f6" /> Portfolio Health Check</h3>
-                            <div className="portfolio-health-list">
-                                {scanData.portfolio_analysis.map((asset, idx) => (
-                                    <div key={idx} className={`health-item ${(asset.recommendation || '').toLowerCase()}`}>
-                                        <div className="health-ticker">{asset.ticker}</div>
-                                        <div className="health-badge">
-                                            {(asset.recommendation || '').replace('_', ' ')}
-                                        </div>
-                                        <div className="health-details">
-                                            Age: {asset.age_days || 0}d | Trend: {asset.trend}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
+                    {activeStrategy !== 'custom' && (
+                        <button
+                            type="button"
+                            className="discovery-action-btn primary"
+                            onClick={() => handleScan(activeStrategy, thresholds)}
+                            disabled={loading}
+                            title="Run strategy scan"
+                        >
+                            <RefreshCw size={17} className={loading ? 'spin' : ''} />
+                            <span>{loading ? 'Scanning...' : 'Scan Now'}</span>
+                        </button>
                     )}
-
                 </div>
+
+                {activeStrategy === 'custom' ? (
+                    <div className="custom-controls-row">
+                        <button
+                            type="button"
+                            className="discovery-action-btn subtle"
+                            onClick={openThresholdsModal}
+                            disabled={loading}
+                            title="Edit custom thresholds"
+                        >
+                            <Settings size={17} />
+                            <span>Thresholds</span>
+                        </button>
+                        <button
+                            type="button"
+                            className="discovery-action-btn primary"
+                            onClick={() => handleScan('custom', thresholds)}
+                            disabled={loading}
+                            title="Run custom scan"
+                        >
+                            <RefreshCw size={17} className={loading ? 'spin' : ''} />
+                            <span>{loading ? 'Scanning...' : 'Scan Now'}</span>
+                        </button>
+                    </div>
+                ) : null}
+
+                <div className="strategy-summary">
+                    <Sparkles size={15} />
+                    <span>Screening Logic</span>
+                </div>
+                <ul className="strategy-details-list">
+                    {activeStrategyConfig.details.map((detail) => (
+                        <li key={detail}>{detail}</li>
+                    ))}
+                </ul>
+            </section>
+
+            {loading && (
+                <section className="discovery-status-card">
+                    <div className="spinner"></div>
+                    <p>{scanProgress.message || 'Scanning market opportunities...'}</p>
+                    {scanProgress.percent > 0 && <p className="muted">Progress: {scanProgress.percent}%</p>}
+                </section>
+            )}
+
+            {!loading && error && (
+                <section className="discovery-status-card error">
+                    <p>{error}</p>
+                </section>
+            )}
+
+            {!loading && !error && !scanData && (
+                <section className="discovery-status-card">
+                    <CheckCircle2 size={20} />
+                    <p>Select a strategy and run scan to generate recommendations.</p>
+                </section>
+            )}
+
+            {!loading && !error && scanData && (
+                <>
+                    <section className="ideas-section">
+                        <div className="section-head">
+                            <h2>Investment Ideas</h2>
+                            <span>{ideas.length} candidates</span>
+                        </div>
+                        <div className="idea-cards-grid">
+                            {ideas.map((idea) => {
+                                const added = watchlistTickers.has(idea.ticker);
+                                return (
+                                    <article className="idea-card" key={idea.ticker}>
+                                        <div className="idea-card-top">
+                                            <div className="idea-name-wrap">
+                                                <h3 title={idea.ticker}>{idea.ticker}</h3>
+                                                <p>{idea.sector}</p>
+                                            </div>
+                                            <span className={`idea-return ${idea.expectedReturn >= 0 ? 'positive' : 'negative'}`}>
+                                                {percentSigned(idea.expectedReturn)}
+                                            </span>
+                                        </div>
+
+                                        <div className="idea-pricing-grid">
+                                            <div>
+                                                <span>Current</span>
+                                                <strong>{currency(idea.currentPrice)}</strong>
+                                            </div>
+                                            <div>
+                                                <span>Target (30D)</span>
+                                                <strong>{currency(idea.targetPrice)}</strong>
+                                            </div>
+                                        </div>
+
+                                        <div className="idea-meta">
+                                            <button
+                                                type="button"
+                                                className="metric-chip"
+                                                title="Score = engine conviction after combining momentum, quality, and upside filters."
+                                                aria-label="Score meaning"
+                                            >
+                                                <TrendingUp size={14} />
+                                                Score {idea.score.toFixed(0)}
+                                                <Info size={12} />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="metric-chip"
+                                                title="Momentum = trend strength proxy derived from RSI and short-term technical acceleration."
+                                                aria-label="Momentum meaning"
+                                            >
+                                                <Target size={14} />
+                                                Momentum {idea.momentum.toFixed(0)}
+                                                <Info size={12} />
+                                            </button>
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            className={`idea-watchlist-btn ${added ? 'added' : ''}`}
+                                            onClick={() => toggleWatchlist(idea)}
+                                        >
+                                            {added ? <Check size={15} /> : <Plus size={15} />}
+                                            {added ? 'Added to Watchlist' : 'Add to Watchlist'}
+                                        </button>
+                                    </article>
+                                );
+                            })}
+                        </div>
+                    </section>
+
+                    <section className="replacement-section">
+                        <div className="section-head">
+                            <h2>Replacement Stock Ranking</h2>
+                            <span>{replacementRanking.length} switches</span>
+                        </div>
+                        {replacementRanking.length === 0 ? (
+                            <p className="muted">No replacement suggestions available yet.</p>
+                        ) : (
+                            <div className="replacement-list">
+                                {replacementRanking.map((item) => {
+                                    const itemKey = `${item.rank}-${item.fromTicker}-${item.toTicker}`;
+                                    const expanded = Boolean(expandedReplacements[itemKey]);
+                                    return (
+                                        <article className={`replacement-item ${expanded ? 'expanded' : 'collapsed'}`} key={itemKey}>
+                                            <div className="replacement-top">
+                                                <span className="replacement-rank">#{item.rank}</span>
+                                                <div className="replacement-route">
+                                                    <strong>Sell {item.fromTicker}</strong>
+                                                    <ArrowRightLeft size={14} />
+                                                    <strong>Buy {item.toTicker}</strong>
+                                                </div>
+                                                <span className="replacement-upside">{percentSigned(item.expectedReturn)}</span>
+                                                <button
+                                                    type="button"
+                                                    className="replacement-toggle-btn"
+                                                    aria-label={expanded ? 'Collapse replacement details' : 'Expand replacement details'}
+                                                    aria-expanded={expanded}
+                                                    onClick={() => toggleReplacementExpansion(itemKey)}
+                                                >
+                                                    {expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                                                </button>
+                                            </div>
+                                            {expanded ? (
+                                                <>
+                                                    <p className="replacement-reason">{item.switchReason}</p>
+                                                    <ul className="replacement-signals">
+                                                        {item.signals.slice(0, 4).map((signal) => (
+                                                            <li key={signal}>
+                                                                <CircleAlert size={13} />
+                                                                <span>{signal}</span>
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                    <div className="replacement-target">
+                                                        Suggested 30D target for {item.toTicker}: <strong>{currency(item.targetPrice)}</strong>
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <p className="replacement-collapsed-hint">Tap to view replacement rationale</p>
+                                            )}
+                                        </article>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </section>
+                </>
             )}
         </div>
     );

@@ -1,15 +1,12 @@
 .modal-overlay {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.7);
+    inset: 0;
+    background: rgba(24, 32, 54, 0.28);
     backdrop-filter: blur(4px);
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: 1200;
     animation: fadeIn 0.2s ease;
 }
 
@@ -17,30 +14,28 @@
     from {
         opacity: 0;
     }
-
     to {
         opacity: 1;
     }
 }
 
 .thresholds-modal {
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-    border-radius: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: #ffffff;
+    border-radius: 18px;
+    border: 1px solid #dbe2f2;
     width: 90%;
     max-width: 520px;
     max-height: 85vh;
     overflow-y: auto;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-    animation: slideUp 0.3s ease;
+    box-shadow: 0 18px 42px rgba(18, 27, 46, 0.22);
+    animation: slideUp 0.25s ease;
 }
 
 @keyframes slideUp {
     from {
         opacity: 0;
-        transform: translateY(20px);
+        transform: translateY(14px);
     }
-
     to {
         opacity: 1;
         transform: translateY(0);
@@ -51,41 +46,38 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 20px 24px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 1rem 1.1rem;
+    border-bottom: 1px solid #e4e9f5;
 }
 
 .modal-header h2 {
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: #ffffff;
-    display: flex;
-    align-items: center;
-    gap: 10px;
     margin: 0;
+    color: #1c2743;
+    font-size: 1.02rem;
+    font-weight: 670;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
 }
 
 .close-btn {
-    background: rgba(255, 255, 255, 0.1);
-    border: none;
-    border-radius: 8px;
-    padding: 8px;
+    border: 1px solid #d8ddec;
+    background: #f8faff;
+    color: #657396;
+    border-radius: 10px;
+    padding: 0.42rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
-    color: #94a3b8;
-    transition: all 0.2s;
-}
-
-.close-btn:hover {
-    background: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
 }
 
 .modal-body {
-    padding: 24px;
+    padding: 1rem 1.1rem;
 }
 
 .threshold-section {
-    margin-bottom: 24px;
+    margin-bottom: 1rem;
 }
 
 .threshold-section:last-child {
@@ -93,22 +85,21 @@
 }
 
 .section-heading {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: #60a5fa;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: #51608a;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 16px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid rgba(96, 165, 250, 0.2);
+    letter-spacing: 0.04em;
+    margin: 0 0 0.58rem;
 }
 
 .threshold-row {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 12px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    justify-content: space-between;
+    gap: 0.8rem;
+    padding: 0.52rem 0;
+    border-bottom: 1px solid #edf1f8;
 }
 
 .threshold-row:last-child {
@@ -116,100 +107,81 @@
 }
 
 .threshold-label {
-    font-size: 0.9rem;
-    color: #e2e8f0;
-    font-weight: 500;
+    color: #334166;
+    font-size: 0.85rem;
+    font-weight: 560;
 }
 
 .threshold-inputs {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: 0.42rem;
 }
 
 .threshold-inputs input {
-    width: 70px;
-    padding: 8px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.05);
-    color: #ffffff;
-    font-size: 0.9rem;
+    width: 72px;
+    border: 1px solid #d6dced;
+    border-radius: 9px;
+    background: #f9fbff;
+    color: #243158;
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 0.38rem 0.42rem;
     text-align: center;
-    transition: all 0.2s;
 }
 
 .threshold-inputs input:focus {
     outline: none;
-    border-color: #60a5fa;
-    background: rgba(96, 165, 250, 0.1);
-}
-
-.threshold-inputs input::-webkit-inner-spin-button,
-.threshold-inputs input::-webkit-outer-spin-button {
-    opacity: 1;
+    border-color: #94a2db;
+    box-shadow: 0 0 0 3px rgba(66, 85, 210, 0.12);
 }
 
 .range-separator {
-    color: #64748b;
-    font-size: 0.85rem;
+    color: #7a849f;
+    font-size: 0.74rem;
 }
 
 .modal-footer {
+    border-top: 1px solid #e4e9f5;
+    padding: 0.86rem 1.1rem;
     display: flex;
     justify-content: space-between;
-    padding: 20px 24px;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 0 0 16px 16px;
+    align-items: center;
+    gap: 0.6rem;
+    background: #fbfcff;
 }
 
 .btn-reset {
-    display: flex;
+    border: 1px solid #d9deec;
+    background: #f8faff;
+    color: #546286;
+    border-radius: 10px;
+    font-size: 0.82rem;
+    font-weight: 620;
+    padding: 0.54rem 0.74rem;
+    display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 10px 16px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 8px;
-    background: transparent;
-    color: #94a3b8;
-    font-size: 0.9rem;
+    gap: 0.34rem;
     cursor: pointer;
-    transition: all 0.2s;
-}
-
-.btn-reset:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: #ffffff;
 }
 
 .btn-apply {
-    padding: 10px 24px;
     border: none;
-    border-radius: 8px;
-    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    border-radius: 10px;
+    background: linear-gradient(135deg, #4255d2 0%, #7d5df2 100%);
     color: #ffffff;
-    font-size: 0.9rem;
-    font-weight: 600;
+    font-size: 0.82rem;
+    font-weight: 650;
+    padding: 0.54rem 0.94rem;
     cursor: pointer;
-    transition: all 0.2s;
+    box-shadow: 0 5px 14px rgba(66, 85, 210, 0.26);
 }
 
-.btn-apply:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
-}
-
-/* Scrollbar styling */
 .thresholds-modal::-webkit-scrollbar {
     width: 6px;
 }
 
-.thresholds-modal::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.05);
-}
-
 .thresholds-modal::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.2);
-    border-radius: 3px;
+    background: #cfd7e8;
+    border-radius: 999px;
 }

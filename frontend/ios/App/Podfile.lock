@@ -14,6 +14,8 @@ PODS:
     - Capacitor
   - CapacitorPreferences (8.0.1):
     - Capacitor
+  - CapacitorScreenOrientation (8.0.1):
+    - Capacitor
   - CapacitorStatusBar (8.0.1):
     - Capacitor
   - CodetrixStudioCapacitorGoogleAuth (0.0.1):
@@ -34,6 +36,7 @@ DEPENDENCIES:
   - "CapacitorCordova (from `../../node_modules/@capacitor/ios`)"
   - "CapacitorHaptics (from `../../node_modules/@capacitor/haptics`)"
   - "CapacitorPreferences (from `../../node_modules/@capacitor/preferences`)"
+  - "CapacitorScreenOrientation (from `../../node_modules/@capacitor/screen-orientation`)"
   - "CapacitorStatusBar (from `../../node_modules/@capacitor/status-bar`)"
   - "CodetrixStudioCapacitorGoogleAuth (from `../../node_modules/@codetrix-studio/capacitor-google-auth`)"
 
@@ -55,6 +58,8 @@ EXTERNAL SOURCES:
     :path: "../../node_modules/@capacitor/haptics"
   CapacitorPreferences:
     :path: "../../node_modules/@capacitor/preferences"
+  CapacitorScreenOrientation:
+    :path: "../../node_modules/@capacitor/screen-orientation"
   CapacitorStatusBar:
     :path: "../../node_modules/@capacitor/status-bar"
   CodetrixStudioCapacitorGoogleAuth:
@@ -67,12 +72,13 @@ SPEC CHECKSUMS:
   CapacitorCordova: e8b76fd95fc1e157775abc484c59cc0de464095d
   CapacitorHaptics: 2079d9fa04c5a71e18663b4722323c304c58245c
   CapacitorPreferences: cca2021f386efb75947c850334447d9ff22b14f1
+  CapacitorScreenOrientation: 6c3c84223ea1dd44aaa7184e2b416dd1192270d0
   CapacitorStatusBar: 32206abd53b14f339763da26f71286deaa891e16
   CodetrixStudioCapacitorGoogleAuth: 9dcfabfb7dd804ad6231a1513bc6e81e620cbec6
   GoogleSignIn: 5651ce3a61e56ca864160e79b484cd9ed3f49b7a
   GTMAppAuth: 0ff230db599948a9ad7470ca667337803b3fc4dd
   GTMSessionFetcher: 3a63d75eecd6aa32c2fc79f578064e1214dfdec2
 
-PODFILE CHECKSUM: 3ec66065f41b72903200ad93d7be86c67f6722ee
+PODFILE CHECKSUM: 6b67dc09fd0444f0f111106631cf442d5c0c6ae5
 
 COCOAPODS: 1.16.2

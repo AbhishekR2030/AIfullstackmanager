@@ -37,6 +37,117 @@ body.dashboard-theme {
     flex-direction: column;
 }
 
+.dashboard-watchlist-card {
+    margin-top: 0.85rem;
+    background: #ffffff;
+    border-radius: 20px;
+    border: 1px solid #dfe4f3;
+    padding: 0.95rem;
+}
+
+.dashboard-watchlist-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.8rem;
+    margin-bottom: 0.72rem;
+}
+
+.dashboard-watchlist-head h3 {
+    margin: 0;
+    color: #1b243d;
+    font-size: 1rem;
+    font-weight: 670;
+}
+
+.dashboard-watchlist-head p {
+    margin: 0.2rem 0 0;
+    color: #7b86a3;
+    font-size: 0.78rem;
+    font-weight: 520;
+}
+
+.dashboard-watchlist-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.26rem;
+    border: 1px solid #d9deed;
+    border-radius: 11px;
+    background: #f7f9ff;
+    color: #324369;
+    font-size: 0.74rem;
+    font-weight: 620;
+    padding: 0.44rem 0.56rem;
+    cursor: pointer;
+}
+
+.dashboard-watchlist-empty {
+    margin: 0;
+    color: #7a849f;
+    font-size: 0.84rem;
+}
+
+.dashboard-watchlist-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.62rem;
+}
+
+.dashboard-watchlist-item {
+    border: 1px solid #d8e1f0;
+    border-radius: 14px;
+    background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%);
+    padding: 0.64rem;
+}
+
+.dashboard-watchlist-item-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.4rem;
+}
+
+.dashboard-watchlist-item-top strong {
+    color: #182036;
+    font-size: 0.93rem;
+    font-weight: 700;
+}
+
+.dashboard-watchlist-return {
+    font-size: 0.72rem;
+    font-weight: 690;
+    border-radius: 999px;
+    padding: 0.16rem 0.42rem;
+}
+
+.dashboard-watchlist-return.positive {
+    color: #13944a;
+    background: #e7f7ee;
+}
+
+.dashboard-watchlist-return.negative {
+    color: #c73a47;
+    background: #fdeef0;
+}
+
+.dashboard-watchlist-item p {
+    margin: 0.28rem 0 0.4rem;
+    color: #7a849f;
+    font-size: 0.72rem;
+}
+
+.dashboard-watchlist-prices {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.dashboard-watchlist-prices span {
+    color: #42507a;
+    font-size: 0.74rem;
+    font-weight: 590;
+}
+
 .dashboard-chart-card.expanded {
     width: 100%;
     height: 100%;
@@ -196,19 +307,22 @@ body.dashboard-theme {
 .dashboard-landscape-overlay {
     position: fixed;
     inset: 0;
+    width: 100%;
+    height: 100%;
     background: #f3f5fb;
     z-index: 1300;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 0;
+    overflow: hidden;
 }
 
 .dashboard-landscape-stage {
-    width: 100vw;
-    height: 100dvh;
-    max-width: 100vw;
-    max-height: 100dvh;
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -241,6 +355,10 @@ body.dashboard-theme {
         padding: 0.88rem;
     }
 
+    .dashboard-watchlist-card {
+        border-radius: 18px;
+    }
+
     .dashboard-chart-head h2 {
         font-size: 1rem;
     }
@@ -248,5 +366,11 @@ body.dashboard-theme {
     .dashboard-time-group {
         width: 100%;
         justify-content: space-between;
+    }
+}
+
+@media (max-width: 430px) {
+    .dashboard-watchlist-grid {
+        grid-template-columns: 1fr;
     }
 }
