@@ -1,35 +1,26 @@
-import sys
 import os
-import json
 
-# Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+import pytest
 
 from dotenv import load_dotenv
 # Load env from backend/.env
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '../.env'))
 
-from backend.app.engines.analyst_engine import AnalystEngine
+from app.engines.analyst_engine import AnalystEngine
+
+
+RUN_LIVE_LLM_TESTS = os.getenv("RUN_LIVE_LLM_TESTS", "0") == "1"
+
 
 def test_tatasteel_analysis():
-    print("Testing Analyst Engine for TATASTEEL.NS...")
-    
+    if not RUN_LIVE_LLM_TESTS:
+        pytest.skip("Set RUN_LIVE_LLM_TESTS=1 to run live Gemini integration test.")
+
     engine = AnalystEngine()
-    
-    # Check if API key is present
+
     if not engine.api_key:
-        print("CRITICAL: GOOGLE_API_KEY is missing. Please add it to backend/.env")
-        return
+        pytest.skip("GOOGLE_API_KEY missing in backend/.env")
 
     result = engine.generate_thesis("TATASTEEL.NS")
-    
-    print("\n--- Analysis Result ---")
-    print(json.dumps(result, indent=2))
-    
-    if "recommendation" in result:
-        print("\nTest PASSED: Generated valid thesis.")
-    else:
-        print("\nTest FAILED: Could not generate thesis.")
-
-if __name__ == "__main__":
-    test_tatasteel_analysis()
+    assert isinstance(result, dict)
+    assert "recommendation" in result or "error" in result

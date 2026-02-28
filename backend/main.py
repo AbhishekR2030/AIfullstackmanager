@@ -1,5 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import HTTPException as FastAPIHTTPException
+from fastapi.exception_handlers import http_exception_handler
 from dotenv import load_dotenv
 import os
 
@@ -19,6 +22,15 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api/v1")
+
+
+@app.exception_handler(FastAPIHTTPException)
+async def standard_http_exception_handler(request: Request, exc: FastAPIHTTPException):
+    # Allow routes/dependencies to raise HTTPException(detail=standard_error_payload(...))
+    # while preserving the exact response contract from the spec.
+    if isinstance(exc.detail, dict) and "error" in exc.detail and "status" in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    return await http_exception_handler(request, exc)
 
 @app.get("/")
 def read_root():

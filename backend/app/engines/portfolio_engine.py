@@ -43,6 +43,13 @@ class PortfolioEngine:
     def _get_db(self):
         return SessionLocal()
 
+    def count_holdings(self, user_email):
+        db = self._get_db()
+        try:
+            return db.query(PortfolioItem).filter(PortfolioItem.user_email == user_email).count()
+        finally:
+            db.close()
+
     def add_trade(self, trade_data, user_email):
         db = self._get_db()
         try:
@@ -119,6 +126,48 @@ class PortfolioEngine:
                 "added_count": len(hdfc_trades),
                 "preserved_dates": len(existing_dates),
                 "total_count": len(hdfc_trades)
+            }
+        finally:
+            db.close()
+
+    def sync_broker_trades(self, trades, user_email, source="BROKER"):
+        """
+        Generic broker sync that preserves existing dates for same-source holdings.
+        """
+        db = self._get_db()
+        source_name = (source or "BROKER").strip().upper()
+        try:
+            existing_items = db.query(PortfolioItem).filter(
+                PortfolioItem.user_email == user_email,
+                PortfolioItem.source == source_name
+            ).all()
+            existing_dates = {item.ticker: item.buy_date for item in existing_items if item.buy_date and item.ticker}
+
+            db.query(PortfolioItem).filter(
+                PortfolioItem.user_email == user_email,
+                PortfolioItem.source == source_name
+            ).delete()
+
+            for trade in trades:
+                ticker = trade.get('ticker', '')
+                buy_date = existing_dates.get(ticker) or trade.get('buy_date', datetime.now().strftime("%Y-%m-%d"))
+                item = PortfolioItem(
+                    user_email=user_email,
+                    ticker=ticker,
+                    company_name=trade.get('company_name', ''),
+                    quantity=int(float(trade.get('quantity', 0))),
+                    buy_price=float(trade.get('buy_price', 0)),
+                    buy_date=buy_date,
+                    source=source_name
+                )
+                db.add(item)
+
+            db.commit()
+            return {
+                "message": f"Portfolio synced with {source_name}",
+                "added_count": len(trades),
+                "preserved_dates": len(existing_dates),
+                "total_count": len(trades)
             }
         finally:
             db.close()

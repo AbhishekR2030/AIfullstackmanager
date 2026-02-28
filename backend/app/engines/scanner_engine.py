@@ -1,6 +1,8 @@
 
 import yfinance as yf
 import pandas as pd
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Tuple
 try:
     import pandas_ta as ta
 except ImportError:
@@ -13,6 +15,96 @@ import json
 import os
 
 import time
+
+
+@dataclass(frozen=True)
+class ScanConfig:
+    strategy: str = "core"
+    rsi_min: int = 50
+    rsi_max: int = 70
+    volume_multiplier: float = 1.5
+    roe_min: float = 12.0
+    roce_min: float = 12.0
+    rev_growth_min: float = 10.0
+    rev_growth_max: float = 100.0
+    profit_growth_min: float = 10.0
+    profit_growth_max: float = 100.0
+    max_debt_equity: float = 100.0
+    moat_check: bool = False
+    min_turnover_cr: float = 5.0
+    min_price: float = 50.0
+    max_price: float = 10000.0
+    momentum_weight: float = 0.4
+    fundamental_weight: float = 0.35
+    valuation_weight: float = 0.25
+
+
+ALPHASEEKER_CORE = ScanConfig(strategy="core")
+CITADEL_MOMENTUM = ScanConfig(
+    strategy="citadel_momentum",
+    rsi_min=53,
+    rsi_max=68,
+    volume_multiplier=1.6,
+    rev_growth_min=8.0,
+    roe_min=14.0,
+    roce_min=14.0,
+    max_debt_equity=120.0,
+    moat_check=True,
+    momentum_weight=0.5,
+    fundamental_weight=0.3,
+    valuation_weight=0.2,
+)
+JANE_STREET_STAT = ScanConfig(
+    strategy="jane_street_stat",
+    rsi_min=38,
+    rsi_max=62,
+    volume_multiplier=1.2,
+    rev_growth_min=0.0,
+    roe_min=8.0,
+    roce_min=8.0,
+    max_debt_equity=200.0,
+    moat_check=False,
+    momentum_weight=0.45,
+    fundamental_weight=0.2,
+    valuation_weight=0.35,
+)
+MILLENNIUM_QUALITY = ScanConfig(
+    strategy="millennium_quality",
+    rsi_min=48,
+    rsi_max=66,
+    volume_multiplier=1.4,
+    rev_growth_min=12.0,
+    roe_min=16.0,
+    roce_min=16.0,
+    max_debt_equity=80.0,
+    moat_check=True,
+    momentum_weight=0.35,
+    fundamental_weight=0.45,
+    valuation_weight=0.2,
+)
+DE_SHAW_MULTIFACTOR = ScanConfig(
+    strategy="de_shaw_multifactor",
+    rsi_min=45,
+    rsi_max=65,
+    volume_multiplier=1.35,
+    rev_growth_min=10.0,
+    roe_min=14.0,
+    roce_min=14.0,
+    max_debt_equity=100.0,
+    moat_check=True,
+    momentum_weight=0.4,
+    fundamental_weight=0.35,
+    valuation_weight=0.25,
+)
+
+STRATEGY_CONFIGS: Dict[str, ScanConfig] = {
+    "core": ALPHASEEKER_CORE,
+    "citadel_momentum": CITADEL_MOMENTUM,
+    "jane_street_stat": JANE_STREET_STAT,
+    "millennium_quality": MILLENNIUM_QUALITY,
+    "de_shaw_multifactor": DE_SHAW_MULTIFACTOR,
+    "custom": ALPHASEEKER_CORE,
+}
 
 class MarketScanner:
     def __init__(self):
@@ -49,6 +141,175 @@ class MarketScanner:
         except:
             return 0.10
 
+    def _resolve_scan_config(self, strategy: str = "core", thresholds: Optional[dict] = None) -> ScanConfig:
+        normalized_strategy = (strategy or "core").strip().lower()
+        base = STRATEGY_CONFIGS.get(normalized_strategy, ALPHASEEKER_CORE)
+        thresholds = thresholds or {}
+        technical = thresholds.get("technical", {}) or {}
+        fundamental = thresholds.get("fundamental", {}) or {}
+
+        if not technical and not fundamental:
+            return base
+
+        return ScanConfig(
+            strategy="custom" if normalized_strategy == "custom" else base.strategy,
+            rsi_min=int(technical.get("rsi_min", base.rsi_min)),
+            rsi_max=int(technical.get("rsi_max", base.rsi_max)),
+            volume_multiplier=float(
+                technical.get(
+                    "volume_shock_min",
+                    technical.get("volume_multiplier", base.volume_multiplier),
+                )
+            ),
+            roe_min=float(fundamental.get("roe_min", base.roe_min)),
+            roce_min=float(fundamental.get("roce_min", base.roce_min)),
+            rev_growth_min=float(
+                fundamental.get(
+                    "revenue_growth_min",
+                    fundamental.get("rev_growth_min", base.rev_growth_min),
+                )
+            ),
+            rev_growth_max=float(
+                fundamental.get(
+                    "revenue_growth_max",
+                    fundamental.get("rev_growth_max", base.rev_growth_max),
+                )
+            ),
+            profit_growth_min=float(fundamental.get("profit_growth_min", base.profit_growth_min)),
+            profit_growth_max=float(fundamental.get("profit_growth_max", base.profit_growth_max)),
+            max_debt_equity=float(
+                fundamental.get(
+                    "debt_equity_max",
+                    fundamental.get("max_debt_equity", base.max_debt_equity),
+                )
+            ),
+            moat_check=bool(fundamental.get("moat_check", base.moat_check)),
+            min_turnover_cr=float(technical.get("min_turnover_cr", base.min_turnover_cr)),
+            min_price=float(technical.get("min_price", base.min_price)),
+            max_price=float(technical.get("max_price", base.max_price)),
+            momentum_weight=base.momentum_weight,
+            fundamental_weight=base.fundamental_weight,
+            valuation_weight=base.valuation_weight,
+        )
+
+    def _normalise(self, value: float, low: float, high: float) -> float:
+        if high <= low:
+            return 0.0
+        clipped = max(low, min(high, float(value)))
+        return ((clipped - low) / (high - low)) * 100.0
+
+    def _economic_moat_check(self, info: dict, roe: float) -> bool:
+        # Support both decimal (0.18) and percentage-style (18) ROE inputs.
+        roe_decimal = float(roe)
+        if roe_decimal > 1.0:
+            roe_decimal = roe_decimal / 100.0
+        beta = info.get("beta", 1.0) or 1.0
+        wacc = 0.6 * (0.073 + beta * 0.06) + 0.4 * (0.09 * 0.75)
+        return (roe_decimal - wacc) >= 0.05
+
+    def _composite_upside_score(self, metrics: dict, config: ScanConfig) -> float:
+        rsi = float(metrics.get("rsi", 50.0))
+        macd_hist = float(metrics.get("macd_hist", 0.0))
+        roe = float(metrics.get("roe", 0.0))
+        rev_growth = float(metrics.get("rev_growth", 0.0))
+        pe = float(metrics.get("pe_ratio", 0.0))
+        rev_growth_pct = rev_growth * 100.0 if rev_growth <= 1.0 else rev_growth
+
+        momentum_score = 0.5 * self._normalise(rsi, 30, 70) + 0.5 * self._normalise(macd_hist, 0, 20)
+        fundamental_score = 0.5 * self._normalise(roe, 12, 30) + 0.5 * self._normalise(rev_growth_pct, 5, 25)
+
+        growth_pct = max(rev_growth_pct, 0.1)
+        peg = pe / growth_pct if pe > 0 else 3.0
+        valuation_score = max(0.0, min(100.0, ((3 - peg) / 2) * 100))
+
+        total = (
+            config.momentum_weight * momentum_score +
+            config.fundamental_weight * fundamental_score +
+            config.valuation_weight * valuation_score
+        )
+        return round(max(0.0, min(100.0, total)), 2)
+
+    def _emit_progress(
+        self,
+        callback: Optional[Callable[[int, str], None]],
+        percent: int,
+        message: str
+    ):
+        if callback:
+            try:
+                callback(max(0, min(100, int(percent))), message)
+            except Exception:
+                pass
+
+    def stage1_universe_liquidity_gate(
+        self,
+        ticker_data: Dict[str, pd.DataFrame],
+        config: ScanConfig,
+        region: str = "IN",
+    ) -> Dict[str, pd.DataFrame]:
+        survivors: Dict[str, pd.DataFrame] = {}
+        usd_inr = 85.0
+        for ticker, df in ticker_data.items():
+            if df is None or df.empty:
+                continue
+            try:
+                current_price = float(df["Close"].iloc[-1])
+                avg_volume = float(df["Volume"].rolling(20).mean().iloc[-1])
+                if not (config.min_price <= current_price <= config.max_price):
+                    continue
+                turnover_inr = (current_price * avg_volume) if region == "IN" else (current_price * avg_volume * usd_inr)
+                if turnover_inr < config.min_turnover_cr * 1e7:
+                    continue
+                survivors[ticker] = df
+            except Exception:
+                continue
+        return survivors
+
+    def stage2_technical_filter(
+        self,
+        ticker_data: Dict[str, pd.DataFrame],
+        config: ScanConfig,
+        volatility_min: float = 3.0,
+        volatility_max: float = 8.0,
+    ) -> List[Dict[str, float]]:
+        survivors: List[Dict[str, float]] = []
+        for ticker, df in ticker_data.items():
+            try:
+                if df.empty or len(df) < 55:
+                    continue
+                current_price = float(df["Close"].iloc[-1])
+                monthly_vol = float(df["Close"].pct_change().tail(30).std() * np.sqrt(21) * 100)
+                if monthly_vol < volatility_min or monthly_vol > volatility_max:
+                    continue
+                sma_20 = float(df["Close"].rolling(20).mean().iloc[-1])
+                sma_50 = float(df["Close"].rolling(50).mean().iloc[-1])
+                if current_price <= sma_20 or current_price <= sma_50:
+                    continue
+                rsi = 50.0
+                if ta:
+                    rsi = float(ta.rsi(df["Close"], length=14).iloc[-1])
+                    if not (config.rsi_min <= rsi <= config.rsi_max):
+                        continue
+                    macd = ta.macd(df["Close"])
+                    if float(macd["MACDh_12_26_9"].iloc[-1]) <= 0:
+                        continue
+                avg_vol_20 = float(df["Volume"].rolling(20).mean().iloc[-1])
+                current_vol = float(df["Volume"].iloc[-1])
+                if current_vol <= (config.volume_multiplier * avg_vol_20):
+                    continue
+                survivors.append(
+                    {
+                        "ticker": ticker,
+                        "df": df,
+                        "price": current_price,
+                        "rsi": rsi,
+                        "vol_shock": float(current_vol / avg_vol_20),
+                    }
+                )
+            except Exception:
+                continue
+        return survivors
+
     def _check_fundamentals(self, ticker, info, region="IN"):
         """
         Stage 2: Fundamental Safety Check & ETF Logic
@@ -84,11 +345,12 @@ class MarketScanner:
 
         return True, "Passed"
 
-    def _calculate_upside_score(self, df, info, region="IN"):
+    def _calculate_upside_score(self, df, info, region="IN", config: Optional[ScanConfig] = None):
         """
         Stage 4: Scoring Engine (0-100)
         """
         try:
+            cfg = config or ALPHASEEKER_CORE
             if ta:
                 rsi = ta.rsi(df['Close'], length=14).iloc[-1]
                 macd = ta.macd(df['Close'])
@@ -124,7 +386,18 @@ class MarketScanner:
                 else: upside_pct = 0.05
             
             val_score = np.clip(upside_pct * 500, 0, 100)
-            total_score = (fund_score * 0.4) + (mom_score * 0.3) + (val_score * 0.3)
+            composite_score = self._composite_upside_score(
+                {
+                    "rsi": rsi,
+                    "macd_hist": macd_hist,
+                    "roe": info.get('returnOnEquity', 0) or 0,
+                    "rev_growth": info.get('revenueGrowth', 0) or 0,
+                    "pe_ratio": info.get('trailingPE', 0) or 0,
+                },
+                cfg,
+            )
+            legacy_score = (fund_score * 0.4) + (mom_score * 0.3) + (val_score * 0.3)
+            total_score = (legacy_score * 0.35) + (composite_score * 0.65)
             
             return {
                 "total_score": round(total_score, 2),
@@ -218,7 +491,14 @@ class MarketScanner:
             return {}
 
 
-    def scan_market(self, region="IN", thresholds=None):
+    def scan_market(
+        self,
+        region: str = "IN",
+        thresholds: Optional[dict] = None,
+        strategy: str = "core",
+        user_plan: str = "pro",
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ):
         """
         Main scanning method with user-configurable thresholds.
         
@@ -227,42 +507,43 @@ class MarketScanner:
             thresholds: Dict with 'technical' and 'fundamental' sub-dicts
         """
         # Default thresholds if not provided
-        if thresholds is None:
-            thresholds = {}
+        thresholds = thresholds or {}
+        config = self._resolve_scan_config(strategy=strategy, thresholds=thresholds)
+
+        # Technical thresholds
+        rsi_min = config.rsi_min
+        rsi_max = config.rsi_max
+        vol_min = float((thresholds.get("technical", {}) or {}).get('volatility_min', 3))
+        vol_max = float((thresholds.get("technical", {}) or {}).get('volatility_max', 8))
+        vol_shock_min = config.volume_multiplier
         
-        tech = thresholds.get('technical', {})
-        fund = thresholds.get('fundamental', {})
-        
-        # Technical Defaults
-        rsi_min = tech.get('rsi_min', 50)
-        rsi_max = tech.get('rsi_max', 70)
-        vol_min = tech.get('volatility_min', 3)
-        vol_max = tech.get('volatility_max', 8)
-        vol_shock_min = tech.get('volume_shock_min', 1.5)
-        
-        # Fundamental Defaults (in decimal, e.g., 0.10 for 10%)
-        rev_growth_min = fund.get('revenue_growth_min', 10) / 100
-        rev_growth_max = fund.get('revenue_growth_max', 100) / 100
-        profit_growth_min = fund.get('profit_growth_min', 10) / 100
-        profit_growth_max = fund.get('profit_growth_max', 100) / 100
-        roe_min = fund.get('roe_min', 12) / 100
-        roe_max = fund.get('roe_max', 100) / 100
-        roce_min = fund.get('roce_min', 12) / 100
-        roce_max = fund.get('roce_max', 100) / 100
-        de_min = fund.get('debt_equity_min', 0)
-        de_max = fund.get('debt_equity_max', 100)
+        # Fundamental thresholds (in decimal, e.g., 0.10 for 10%)
+        rev_growth_min = config.rev_growth_min / 100
+        rev_growth_max = config.rev_growth_max / 100
+        profit_growth_min = config.profit_growth_min / 100
+        profit_growth_max = config.profit_growth_max / 100
+        roe_min = config.roe_min / 100
+        roe_max = 1.0
+        roce_min = config.roce_min / 100
+        roce_max = 1.0
+        de_min = 0.0
+        de_max = config.max_debt_equity
         
         # 1. Cache Check (skip cache if custom thresholds provided)
         if not thresholds and self.cache and (time.time() - self.last_scan_time < self.CACHE_DURATION):
             print("Returning Cached Scan Results (Speed Optimized)")
+            if (user_plan or "").strip().lower() == "free":
+                return self.cache[:10]
             return self.cache
 
         print(f"Starting Scan ({region}) with thresholds: RSI={rsi_min}-{rsi_max}, Vol={vol_min}-{vol_max}%...")
         
         try:
+            self._emit_progress(progress_callback, 5, "Loading market universe")
             tickers = self.loader.get_india_tickers() if region == "IN" else self.loader.get_us_tickers()
             
             # 2. Batch Fetch History (Technicals via Yahoo - Reliable)
+            self._emit_progress(progress_callback, 15, "Fetching OHLCV data")
             data = self.loader.fetch_data(tickers, period="3mo")
             if data is None or data.empty: 
                 if self.cache: return self.cache
@@ -273,6 +554,7 @@ class MarketScanner:
             usd_inr = 85.0
             
             print(f"Tech screening {len(tickers)} assets...")
+            self._emit_progress(progress_callback, 30, f"Applying technical filters on {len(tickers)} stocks")
             
             for ticker in tickers:
                  try:
@@ -285,8 +567,11 @@ class MarketScanner:
                     
                     # Liquidity
                     daily_turnover = current_price * avg_vol_20
-                    turnover_usd = daily_turnover / usd_inr if region == "IN" else daily_turnover
-                    if turnover_usd < 1_000_000: continue
+                    turnover_inr = daily_turnover if region == "IN" else daily_turnover * usd_inr
+                    if current_price < config.min_price or current_price > config.max_price:
+                        continue
+                    if turnover_inr < (config.min_turnover_cr * 1e7):
+                        continue
                     
                     # Volatility (use thresholds)
                     monthly_vol = df['Close'].pct_change().tail(30).std() * np.sqrt(21) * 100
@@ -325,15 +610,17 @@ class MarketScanner:
                     })
                  except: continue
     
-            # 4. Select Top 5 for Fundamental Analysis
+            # 4. Select top technical candidates for fundamental analysis.
+            # Keep this above free-cap (10) so Pro can see a broader ranked list.
             tech_pass_candidates.sort(key=lambda x: x.get('vol_shock', 0), reverse=True)
-            top_candidates = tech_pass_candidates[:5]
+            top_candidates = tech_pass_candidates[:30]
             
             if not top_candidates: 
                  if self.cache: return self.cache
                  return []
             
             # 5. Fetch Fundamentals via Yahoo Finance (FREE - no API key needed)
+            self._emit_progress(progress_callback, 60, "Evaluating fundamentals")
             print("=" * 50, flush=True)
             print("[DEPLOY v2.0] Fetching fundamentals via YAHOO FINANCE (not FMP!)", flush=True)
             print("=" * 50, flush=True)
@@ -409,7 +696,12 @@ class MarketScanner:
                 else:
                     print(f"[FUND] PARTIAL {ticker}: Failed checks: {failed_list}", flush=True)
     
-                score_data = self._calculate_upside_score(cand.get('df'), info_proxy, region)
+                if config.moat_check and not self._economic_moat_check(info_proxy, info_proxy.get("returnOnEquity", 0) or 0):
+                    passed = False
+                    failed_checks.append("EconomicMoat: ROE-WACC < 5%")
+                    failed_list = ", ".join(failed_checks)
+
+                score_data = self._calculate_upside_score(cand.get('df'), info_proxy, region, config=config)
                 
                 # Build comprehensive thesis with ALL metrics
                 rev_val = info_proxy['revenueGrowth'] * 100
@@ -478,11 +770,14 @@ class MarketScanner:
     
             # 6. Final Sort & Cache
             final_list.sort(key=lambda x: x.get('score', 0), reverse=True)
+            if (user_plan or "").strip().lower() == "free":
+                final_list = final_list[:10]
             
             # Update Cache (only if default thresholds)
             if not thresholds:
                 self.cache = final_list
                 self.last_scan_time = time.time()
+            self._emit_progress(progress_callback, 100, "Scan complete")
             
             return final_list
             

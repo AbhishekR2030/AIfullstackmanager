@@ -4,6 +4,28 @@ import google.generativeai as genai
 import json
 import time
 from datetime import datetime, timedelta
+from typing import Optional
+
+from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy.orm import Session
+
+from app.engines.auth_engine import Base, engine, UsageLog
+
+
+class ThesisCache(Base):
+    __tablename__ = "thesis_cache"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticker = Column(String(32), index=True, nullable=False)
+    user_email = Column(String, index=True, nullable=False)
+    payload_json = Column(Text, nullable=False)
+    model_used = Column(String(128), nullable=True)
+    generated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+
+Base.metadata.create_all(bind=engine)
+
 
 class AnalystEngine:
     def __init__(self):
@@ -25,9 +47,74 @@ class AnalystEngine:
         # Track rate-limited models to skip them temporarily
         self.rate_limited_models = {}  # {model_name: expire_time}
 
-    def generate_thesis(self, ticker_symbol):
+    def get_cached_thesis(self, ticker_symbol: str, user_email: Optional[str], db: Optional[Session]):
+        if not db or not user_email:
+            return None
+        normalized_email = (user_email or "").strip().lower()
+        ticker = (ticker_symbol or "").strip().upper()
+        if not normalized_email or not ticker:
+            return None
+
+        cache_entry = (
+            db.query(ThesisCache)
+            .filter(
+                ThesisCache.ticker == ticker,
+                ThesisCache.user_email == normalized_email,
+                ThesisCache.expires_at > datetime.utcnow(),
+            )
+            .order_by(ThesisCache.id.desc())
+            .first()
+        )
+        if not cache_entry:
+            return None
+        try:
+            payload = json.loads(cache_entry.payload_json)
+        except Exception:
+            return None
+
+        payload["cached"] = True
+        payload["model_used"] = cache_entry.model_used or payload.get("model_used")
+        payload["generated_at"] = cache_entry.generated_at.isoformat() if cache_entry.generated_at else None
+        return payload
+
+    def _save_cache(self, ticker_symbol: str, user_email: Optional[str], result: dict, db: Optional[Session]):
+        if not db or not user_email:
+            return
+        ticker = (ticker_symbol or "").strip().upper()
+        normalized_email = (user_email or "").strip().lower()
+        if not ticker or not normalized_email:
+            return
+
+        cache_entry = ThesisCache(
+            ticker=ticker,
+            user_email=normalized_email,
+            payload_json=json.dumps(result),
+            model_used=result.get("model_used"),
+            generated_at=datetime.utcnow(),
+            expires_at=datetime.utcnow() + timedelta(hours=6),
+        )
+        db.add(cache_entry)
+        db.commit()
+
+    def _log_usage(self, user_email: Optional[str], db: Optional[Session]):
+        if not db or not user_email:
+            return
+        record = UsageLog(
+            user_email=(user_email or "").strip().lower(),
+            action="thesis",
+            created_at=datetime.utcnow(),
+        )
+        db.add(record)
+        db.commit()
+
+    def generate_thesis(self, ticker_symbol, user_email: Optional[str] = None, db: Optional[Session] = None, force_refresh: bool = False):
         if not self.api_key:
             return {"error": "LLM not initialized (Missing API Key)"}
+
+        if not force_refresh:
+            cached = self.get_cached_thesis(ticker_symbol, user_email, db)
+            if cached:
+                return cached
 
         data = self.fetch_market_data(ticker_symbol)
         news = self.fetch_news(ticker_symbol)
@@ -82,6 +169,10 @@ class AnalystEngine:
                 
                 # If successful, inject the model name used for transparency
                 result['model_used'] = model_name 
+                result['cached'] = False
+                result['generated_at'] = datetime.utcnow().isoformat()
+                self._save_cache(ticker_symbol, user_email, result, db)
+                self._log_usage(user_email, db)
                 print(f"[AI] Success with {model_name}", flush=True)
                 return result
 
@@ -144,6 +235,6 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv(dotenv_path="../.env") # Adjust path as needed
     
-    engine = AnalystEngine()
-    result = engine.generate_thesis("TATASTEEL.NS")
+    analyst_engine_instance = AnalystEngine()
+    result = analyst_engine_instance.generate_thesis("TATASTEEL.NS")
     print(json.dumps(result, indent=2))

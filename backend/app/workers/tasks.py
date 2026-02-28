@@ -21,6 +21,7 @@ import os
 
 from app.core.celery_app import celery_app
 from app.engines.market_loader import market_loader
+from app.engines.scanner_engine import scanner as market_scanner
 
 # Redis client for progress tracking
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -211,7 +212,13 @@ def compute_technicals(self, batch_result: Dict[str, Any], job_id: str) -> List[
 # TASK 3: Master Scan Workflow (Orchestrator)
 # ============================================================================
 @celery_app.task(bind=True)
-def master_scan_workflow(self, region: str = "IN") -> Dict[str, Any]:
+def master_scan_workflow(
+    self,
+    region: str = "IN",
+    strategy: str = "core",
+    thresholds: Optional[Dict[str, Any]] = None,
+    user_plan: str = "pro",
+) -> Dict[str, Any]:
     """
     Main orchestrator task that splits work into parallel batches.
     
@@ -224,93 +231,34 @@ def master_scan_workflow(self, region: str = "IN") -> Dict[str, Any]:
     job_id = self.request.id
     
     try:
-        # Initialize progress
+        # Use scanner_engine's progress callback contract so sync/async scans behave consistently.
         update_progress(job_id, "Starting market scan...", 0)
-        
-        # Get ticker list
-        if region == "IN":
-            all_tickers = market_loader.get_india_tickers()
-        else:
-            all_tickers = market_loader.get_us_tickers()
-        
-        update_progress(job_id, f"Scanning {len(all_tickers)} stocks...", 5)
-        
-        # Split into chunks of 50
-        BATCH_SIZE = 50
-        batches = [
-            all_tickers[i:i + BATCH_SIZE] 
-            for i in range(0, len(all_tickers), BATCH_SIZE)
-        ]
-        
-        total_batches = len(batches)
-        update_progress(job_id, f"Processing {total_batches} batches...", 10)
-        
-        # Process batches sequentially to respect rate limits
-        # (Using parallel would hit Yahoo Finance rate limits)
-        all_passed = []
-        
-        for batch_id, batch_tickers in enumerate(batches, 1):
-            try:
-                # Fetch data
-                fetch_result = fetch_batch_data.apply(
-                    args=[batch_tickers, batch_id, job_id]
-                ).get(timeout=120)
-                
-                # Compute technicals
-                passed = compute_technicals.apply(
-                    args=[fetch_result, job_id]
-                ).get(timeout=60)
-                
-                if passed:
-                    all_passed.extend(passed)
-                
-                # Update progress
-                progress = 10 + int((batch_id / total_batches) * 80)
-                update_progress(
-                    job_id, 
-                    f"Processed batch {batch_id}/{total_batches}", 
-                    progress
-                )
-                
-            except Exception as e:
-                print(f"Batch {batch_id} failed: {e}")
-                # Continue with next batch - don't abort entire scan
-                continue
-        
-        update_progress(job_id, "Ranking results...", 95)
-        
-        # Sort by volume shock (best first) and take top 5
-        all_passed.sort(key=lambda x: x["vol_shock"], reverse=True)
-        top_candidates = all_passed[:5]
-        
-        # Calculate final scores for top candidates
-        final_results = []
-        for cand in top_candidates:
-            score = calculate_upside_score(cand)
-            cand["score"] = score["total_score"]
-            cand["upside_potential"] = score["upside_pct"]
-            cand["momentum_score"] = score["momentum_score"]
-            cand["sector"] = "Technical Pass"  # Simplified - no Perplexity in async
-            cand["beta"] = 1.0
-            final_results.append(cand)
-        
-        # Final sort by total score
-        final_results.sort(key=lambda x: x["score"], reverse=True)
-        
+
+        def _progress(percent: int, message: str):
+            update_progress(job_id, message, percent)
+
+        final_results = market_scanner.scan_market(
+            region=region,
+            thresholds=thresholds or {},
+            strategy=strategy,
+            user_plan=user_plan,
+            progress_callback=_progress,
+        )
+
         update_progress(job_id, "Scan complete!", 100)
-        
-        # Store results in Redis
+
         redis_client.setex(
             f"scan_results_{job_id}",
-            3600,  # 1 hour expiry
-            json.dumps(final_results)
+            3600,
+            json.dumps(final_results),
         )
-        
+
         return {
             "status": "SUCCESS",
             "job_id": job_id,
+            "strategy": strategy,
             "count": len(final_results),
-            "results": final_results
+            "results": final_results,
         }
         
     except Exception as e:

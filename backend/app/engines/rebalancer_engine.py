@@ -1,6 +1,7 @@
 
 from datetime import datetime, timedelta
 import pandas as pd
+from typing import Dict, Optional, Tuple
 try:
     import pandas_ta as ta
 except ImportError:
@@ -10,6 +11,204 @@ import numpy as np
 
 
 class RebalancerEngine:
+    def _candidate_score(self, candidate) -> float:
+        if not isinstance(candidate, dict):
+            return 0.0
+        return float(candidate.get("score", candidate.get("upside_score", 0)) or 0)
+
+    def compute_sell_urgency(self, holding, market_data, top_scan_score=None):
+        """
+        Composite sell urgency score (0-100) using 4 weighted signals.
+        Signal 2 is skipped and remaining signals are re-weighted if top_scan_score is missing.
+        """
+        try:
+            signal_points = {}
+            signal_max = {
+                "momentum_deterioration": 25,
+                "better_opportunity": 30,
+                "fundamental_weakening": 25,
+                "stoploss_trailing": 20,
+            }
+
+            # Signal 1: Momentum deterioration (max 25, includes MACD bonus with cap)
+            rsi = float(market_data.get("rsi", 50) or 50)
+            macd_hist = float(market_data.get("macd_hist", 0) or 0)
+            momentum_points = 0
+            if rsi < 35:
+                momentum_points = 25
+            elif rsi < 45:
+                momentum_points = 15
+            elif rsi < 50:
+                momentum_points = 5
+            if macd_hist < 0:
+                momentum_points = min(25, momentum_points + 10)
+            signal_points["momentum_deterioration"] = momentum_points
+
+            # Signal 2: Better opportunity available (max 30, optional)
+            current_score = float(market_data.get("asset_score", holding.get("score", 0)) or 0)
+            if top_scan_score is None:
+                signal_points["better_opportunity"] = None
+            else:
+                gap = float(top_scan_score) - current_score
+                if gap >= 25:
+                    signal_points["better_opportunity"] = 30
+                elif gap >= 15:
+                    signal_points["better_opportunity"] = 18
+                elif gap >= 8:
+                    signal_points["better_opportunity"] = 8
+                else:
+                    signal_points["better_opportunity"] = 0
+
+            # Signal 3: Fundamental weakening (max 25)
+            roe_purchase = market_data.get("roe_purchase")
+            roe_current = market_data.get("roe_current")
+            rev_growth = float(market_data.get("rev_growth", 0) or 0)
+            fundamental_points = 0
+            if roe_purchase is not None and roe_current is not None:
+                try:
+                    roe_purchase = float(roe_purchase)
+                    roe_current = float(roe_current)
+                    if roe_purchase > 0 and roe_current <= (roe_purchase * 0.8):
+                        fundamental_points += 20
+                except Exception:
+                    pass
+            if rev_growth < 0:
+                fundamental_points += 15
+            elif rev_growth < 0.05:
+                fundamental_points += 5
+            signal_points["fundamental_weakening"] = min(25, fundamental_points)
+
+            # Signal 4: Stop-loss / trailing stop (max 20)
+            drawdown_from_buy = float(market_data.get("drawdown_from_buy", 0) or 0)
+            if drawdown_from_buy >= 15:
+                stop_points = 20
+            elif drawdown_from_buy >= 8:
+                stop_points = 12
+            elif drawdown_from_buy >= 5:
+                stop_points = 6
+            else:
+                stop_points = 0
+            signal_points["stoploss_trailing"] = stop_points
+
+            used_signals = {k: v for k, v in signal_points.items() if v is not None}
+            raw_score = float(sum(used_signals.values()))
+            available_max = float(sum(signal_max[k] for k in used_signals.keys()))
+            score = int(round((raw_score / available_max) * 100)) if available_max > 0 else 0
+            score = max(0, min(100, score))
+
+            dominant_key = max(used_signals, key=lambda k: used_signals[k]) if used_signals else "momentum_deterioration"
+            signal_labels = {
+                "momentum_deterioration": "Momentum deterioration",
+                "better_opportunity": "Better opportunity available",
+                "fundamental_weakening": "Fundamental weakening",
+                "stoploss_trailing": "Stop-loss / trailing stop",
+            }
+
+            if score >= 70:
+                badge = "SELL"
+            elif score >= 45:
+                badge = "REVIEW"
+            elif score >= 20:
+                badge = "WATCH"
+            else:
+                badge = "HOLD"
+
+            return {
+                "score": score,
+                "primary_signal": signal_labels.get(dominant_key, "Momentum deterioration"),
+                "badge": badge,
+            }
+        except Exception:
+            return {"score": 0, "primary_signal": "Insufficient data", "badge": "HOLD"}
+
+    def _build_market_data(self, df, info, holding):
+        market_data = {
+            "rsi": 50.0,
+            "macd_hist": 0.0,
+            "roe_current": info.get("returnOnEquity", None) if isinstance(info, dict) else None,
+            "roe_purchase": holding.get("roe_at_buy", None),
+            "rev_growth": info.get("revenueGrowth", 0.0) if isinstance(info, dict) else 0.0,
+            "asset_score": holding.get("score", 0),
+            "drawdown_from_buy": 0.0,
+        }
+        try:
+            if df is not None and not df.empty and ta:
+                market_data["rsi"] = float(ta.rsi(df["Close"], length=14).iloc[-1])
+                macd = ta.macd(df["Close"])
+                market_data["macd_hist"] = float(macd["MACDh_12_26_9"].iloc[-1])
+            buy_price = float(holding.get("buy_price", 0) or 0)
+            current_price = float(holding.get("current_price", 0) or 0)
+            if buy_price > 0 and current_price > 0 and current_price < buy_price:
+                market_data["drawdown_from_buy"] = ((buy_price - current_price) / buy_price) * 100
+        except Exception:
+            pass
+        return market_data
+
+    def get_rebalancing_suggestions(self, user_email, db=None, redis=None):
+        from app.engines.portfolio_engine import portfolio_manager
+
+        portfolio = portfolio_manager.get_portfolio(user_email)
+        scan_results = None
+        if redis is not None:
+            try:
+                raw = redis.get(f"scan_results:{user_email}")
+                if raw:
+                    import json as _json
+                    scan_results = _json.loads(raw)
+            except Exception:
+                scan_results = None
+
+        if scan_results is None:
+            from app.engines.scanner_engine import scanner
+            scan_results = scanner.cache or []
+
+        top_scan_score = None
+        if isinstance(scan_results, list) and scan_results:
+            sorted_scan = sorted(scan_results, key=self._candidate_score, reverse=True)
+            top_scan_score = self._candidate_score(sorted_scan[0])
+        else:
+            sorted_scan = []
+
+        analyzed = self.analyze_portfolio(portfolio, new_candidates=sorted_scan or scan_results)
+        sell_candidates = [h for h in analyzed if h.get("sell_urgency_score", 0) >= 60]
+        buy_recommendations = [
+            c for c in (sorted_scan or scan_results or [])
+            if c.get("ticker") not in {h.get("ticker") for h in portfolio}
+        ]
+
+        sell_sorted = sorted(sell_candidates, key=lambda x: x.get("sell_urgency_score", 0), reverse=True)
+        buy_sorted = sorted(buy_recommendations, key=self._candidate_score, reverse=True)
+
+        swap_pairs = []
+        for i, sell in enumerate(sell_sorted):
+            if i >= len(buy_sorted):
+                break
+            buy = buy_sorted[i]
+            sell_value = float(sell.get("total_value", 0) or 0)
+            buy_price = float(buy.get("price", 0) or 0)
+            approximate_shares = int(sell_value / buy_price) if buy_price > 0 else 0
+            swap_pairs.append({
+                "sell": {
+                    "ticker": sell.get("ticker"),
+                    "current_value": sell_value,
+                    "sell_urgency_score": sell.get("sell_urgency_score", 0),
+                },
+                "buy": {
+                    "ticker": buy.get("ticker"),
+                    "upside_score": self._candidate_score(buy),
+                    "approximate_shares": approximate_shares,
+                },
+                "rationale": f"Replace low-momentum {sell.get('ticker')} (urgency {sell.get('sell_urgency_score')}) with stronger {buy.get('ticker')} (score {self._candidate_score(buy)}).",
+            })
+
+        return {
+            "sell_candidates": sell_sorted,
+            "buy_recommendations": buy_sorted[:10],
+            "swap_pairs": swap_pairs,
+            "last_scan_age_hours": None,
+            "top_scan_score": top_scan_score,
+        }
+
     def _calculate_upside_score(self, df, info):
         """
         Calculates Upside Score (0-100) matching Screener logic.
@@ -86,7 +285,7 @@ class RebalancerEngine:
         today = datetime.now()
         
         # Get Best New Candidate Score
-        best_new_score = 0
+        best_new_score = None
         if new_candidates:
             best_new_score = new_candidates[0].get('score', 0)
 
@@ -124,6 +323,7 @@ class RebalancerEngine:
             score_data = {"total_score": 0, "upside_pct": 0, "mom_score": 0}
             score = 0.0
             trend = "Unknown"
+            urgency = {"score": 0, "badge": "HOLD", "primary_signal": "Insufficient data"}
             
             try:
                 # Need Info for Scoring (Expensive but necessary for 'Step D')
@@ -158,6 +358,12 @@ class RebalancerEngine:
                     score_data = self._calculate_upside_score(df, info)
                     score = score_data['total_score']
                     pl_pct = asset.get('pl_percent', 0)
+                    market_data = self._build_market_data(df, info, {**asset, "score": score})
+                    urgency = self.compute_sell_urgency(
+                        holding={**asset, "score": score},
+                        market_data=market_data,
+                        top_scan_score=best_new_score,
+                    )
                     
                     # --- Step C: Weakest Link ---
                     # We evaluate Sell/Swap potential regardless of lock, 
@@ -182,7 +388,7 @@ class RebalancerEngine:
                         
                     # --- Step D: Swap Decision (High Conviction) ---
                     # Rule: IF New > Old * 1.5
-                    if best_new_score > (score * 1.5):
+                    if best_new_score is not None and best_new_score > (score * 1.5):
                             if recommendation != "SELL_CANDIDATE":
                                 recommendation = "SWAP_ADVICE"
                                 reason = f"Upgrade Available: Score {best_new_score}"
@@ -205,7 +411,11 @@ class RebalancerEngine:
                 "reason": reason,
                 "score": round(score, 1),
                 "trend": trend,
-                "pl_percent": asset.get('pl_percent', 0)
+                "pl_percent": asset.get('pl_percent', 0),
+                "current_value": asset.get("total_value", 0),
+                "sell_urgency_score": urgency.get("score", 0),
+                "sell_urgency_badge": urgency.get("badge", "HOLD"),
+                "primary_sell_signal": urgency.get("primary_signal", "Insufficient data"),
             })
             
         return analyzed_assets
