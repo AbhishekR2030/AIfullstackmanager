@@ -422,9 +422,6 @@ const Portfolio = () => {
                     >
                         <Search size={20} />
                     </button>
-                    <button className="portfolio-avatar-button" type="button" aria-label="Account">
-                        AC
-                    </button>
                 </div>
             </div>
 

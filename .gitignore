@@ -15,6 +15,8 @@ venv/
 .venv/
 env/
 users.db
+backend/users.db
+backend/.hypothesis/
 backend/requirements_temp.txt
 
 # Environment Variables

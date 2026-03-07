@@ -1,19 +1,19 @@
 html.dashboard-theme,
 body.dashboard-theme {
-    background: #f3f5fb !important;
-    color: #182036 !important;
+    background: var(--surface-page) !important;
+    color: var(--text-primary) !important;
     padding-top: 0 !important;
     padding-bottom: 0 !important;
 }
 
 .dashboard-native-page {
     animation: dashboardFadeIn 0.3s ease-out;
-    background: linear-gradient(180deg, #fafbff 0%, #f3f5fc 58%, #f1f3fa 100%);
-    border: 1px solid #e5e8f2;
+    background: var(--surface-shell);
+    border: 1px solid var(--border-soft);
     border-radius: 24px;
     padding: 1.1rem;
-    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", sans-serif;
+    box-shadow: var(--shadow-soft);
+    font-family: var(--font-sans);
 }
 
 @keyframes dashboardFadeIn {
@@ -28,9 +28,9 @@ body.dashboard-theme {
 }
 
 .dashboard-chart-card {
-    background: #ffffff;
+    background: var(--surface-card);
     border-radius: 20px;
-    border: 1px solid #dfe4f3;
+    border: 1px solid var(--border-soft);
     padding: 1rem;
     min-height: 460px;
     display: flex;
@@ -39,9 +39,9 @@ body.dashboard-theme {
 
 .dashboard-watchlist-card {
     margin-top: 0.85rem;
-    background: #ffffff;
+    background: var(--surface-card);
     border-radius: 20px;
-    border: 1px solid #dfe4f3;
+    border: 1px solid var(--border-soft);
     padding: 0.95rem;
 }
 
@@ -55,14 +55,14 @@ body.dashboard-theme {
 
 .dashboard-watchlist-head h3 {
     margin: 0;
-    color: #1b243d;
+    color: var(--text-strong);
     font-size: 1rem;
     font-weight: 670;
 }
 
 .dashboard-watchlist-head p {
     margin: 0.2rem 0 0;
-    color: #7b86a3;
+    color: var(--text-muted);
     font-size: 0.78rem;
     font-weight: 520;
 }
@@ -71,10 +71,10 @@ body.dashboard-theme {
     display: inline-flex;
     align-items: center;
     gap: 0.26rem;
-    border: 1px solid #d9deed;
+    border: 1px solid var(--border-strong);
     border-radius: 11px;
-    background: #f7f9ff;
-    color: #324369;
+    background: var(--surface-muted);
+    color: var(--text-primary);
     font-size: 0.74rem;
     font-weight: 620;
     padding: 0.44rem 0.56rem;
@@ -83,7 +83,7 @@ body.dashboard-theme {
 
 .dashboard-watchlist-empty {
     margin: 0;
-    color: #7a849f;
+    color: var(--text-muted);
     font-size: 0.84rem;
 }
 
@@ -94,9 +94,9 @@ body.dashboard-theme {
 }
 
 .dashboard-watchlist-item {
-    border: 1px solid #d8e1f0;
+    border: 1px solid var(--border-soft);
     border-radius: 14px;
-    background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%);
+    background: linear-gradient(180deg, var(--surface-card) 0%, var(--surface-muted) 100%);
     padding: 0.64rem;
 }
 
@@ -108,7 +108,7 @@ body.dashboard-theme {
 }
 
 .dashboard-watchlist-item-top strong {
-    color: #182036;
+    color: var(--text-strong);
     font-size: 0.93rem;
     font-weight: 700;
 }
@@ -132,7 +132,7 @@ body.dashboard-theme {
 
 .dashboard-watchlist-item p {
     margin: 0.28rem 0 0.4rem;
-    color: #7a849f;
+    color: var(--text-muted);
     font-size: 0.72rem;
 }
 
@@ -143,7 +143,7 @@ body.dashboard-theme {
 }
 
 .dashboard-watchlist-prices span {
-    color: #42507a;
+    color: var(--text-primary);
     font-size: 0.74rem;
     font-weight: 590;
 }
@@ -180,7 +180,7 @@ body.dashboard-theme {
 
 .dashboard-chart-head h2 {
     margin: 0;
-    color: #1b243d;
+    color: var(--text-strong);
     font-size: 1.12rem;
     font-weight: 650;
 }
@@ -210,16 +210,16 @@ body.dashboard-theme {
     align-items: center;
     gap: 0.18rem;
     padding: 0.18rem;
-    border: 1px solid #d8dced;
+    border: 1px solid var(--border-strong);
     border-radius: 12px;
-    background: #f8faff;
+    background: var(--surface-muted);
 }
 
 .dashboard-orientation-btn {
     border: none;
     border-radius: 10px;
     background: transparent;
-    color: #7a8197;
+    color: var(--text-muted);
     padding: 0.36rem 0.54rem;
     font-size: 0.72rem;
     font-weight: 620;
@@ -227,18 +227,18 @@ body.dashboard-theme {
 }
 
 .dashboard-orientation-btn.active {
-    background: #ffffff;
-    color: #2d385c;
+    background: var(--surface-card);
+    color: var(--text-primary);
     box-shadow: 0 1px 2px rgba(18, 27, 46, 0.08);
 }
 
 .dashboard-icon-button {
     width: 38px;
     height: 38px;
-    border: 1px solid #d8dced;
+    border: 1px solid var(--border-strong);
     border-radius: 12px;
-    background: #ffffff;
-    color: #4f5875;
+    background: var(--surface-card);
+    color: var(--text-secondary);
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -246,8 +246,8 @@ body.dashboard-theme {
 }
 
 .dashboard-icon-button:hover {
-    border-color: #b8bfd8;
-    color: #2f4fcd;
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
 }
 
 .dashboard-controls {
@@ -265,9 +265,9 @@ body.dashboard-theme {
     align-items: center;
     gap: 0.25rem;
     padding: 0.2rem;
-    border: 1px solid #dbe0ef;
+    border: 1px solid var(--border-strong);
     border-radius: 12px;
-    background: #f8faff;
+    background: var(--surface-muted);
 }
 
 .dashboard-toggle-btn,
@@ -275,7 +275,7 @@ body.dashboard-theme {
     border: none;
     border-radius: 10px;
     background: transparent;
-    color: #7a8197;
+    color: var(--text-muted);
     padding: 0.44rem 0.68rem;
     font-size: 0.78rem;
     font-weight: 620;
@@ -284,8 +284,8 @@ body.dashboard-theme {
 
 .dashboard-toggle-btn.active,
 .dashboard-time-btn.active {
-    background: #ffffff;
-    color: #283355;
+    background: var(--surface-card);
+    color: var(--text-primary);
     box-shadow: 0 1px 2px rgba(18, 27, 46, 0.08);
 }
 
@@ -300,7 +300,7 @@ body.dashboard-theme {
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #7c859d;
+    color: var(--text-muted);
     font-size: 0.9rem;
 }
 
@@ -309,7 +309,7 @@ body.dashboard-theme {
     inset: 0;
     width: 100%;
     height: 100%;
-    background: #f3f5fb;
+    background: var(--surface-page);
     z-index: 1300;
     display: flex;
     align-items: center;
@@ -346,7 +346,7 @@ body.dashboard-theme {
         box-shadow: none;
         padding: calc(env(safe-area-inset-top) + 0.1rem) 0.35rem 5.9rem;
         margin: 0 -0.25rem;
-        background: linear-gradient(180deg, #fafbff 0%, #f3f5fc 58%, #f1f3fa 100%);
+        background: var(--surface-shell);
     }
 
     .dashboard-chart-card {

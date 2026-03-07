@@ -39,7 +39,13 @@ class User(Base):
     hashed_password = Column(String)
     is_active = Column(Boolean, default=True)
     plan = Column(String(20), nullable=False, default="free")
+    billing_plan = Column(String(20), nullable=True)
     plan_expires_at = Column(DateTime, nullable=True)
+    apple_sub = Column(String, index=True, nullable=True)
+    first_name = Column(String(64), nullable=True)
+    middle_name = Column(String(64), nullable=True)
+    last_name = Column(String(64), nullable=True)
+    profession = Column(String(128), nullable=True)
 
 class UsageLog(Base):
     __tablename__ = "usage_log"
@@ -67,8 +73,20 @@ def _run_schema_migrations():
 
     if "plan" not in user_columns:
         migration_statements.append("ALTER TABLE users ADD COLUMN plan VARCHAR(20) DEFAULT 'free'")
+    if "billing_plan" not in user_columns:
+        migration_statements.append("ALTER TABLE users ADD COLUMN billing_plan VARCHAR(20)")
     if "plan_expires_at" not in user_columns:
         migration_statements.append("ALTER TABLE users ADD COLUMN plan_expires_at TIMESTAMP")
+    if "apple_sub" not in user_columns:
+        migration_statements.append("ALTER TABLE users ADD COLUMN apple_sub VARCHAR")
+    if "first_name" not in user_columns:
+        migration_statements.append("ALTER TABLE users ADD COLUMN first_name VARCHAR(64)")
+    if "middle_name" not in user_columns:
+        migration_statements.append("ALTER TABLE users ADD COLUMN middle_name VARCHAR(64)")
+    if "last_name" not in user_columns:
+        migration_statements.append("ALTER TABLE users ADD COLUMN last_name VARCHAR(64)")
+    if "profession" not in user_columns:
+        migration_statements.append("ALTER TABLE users ADD COLUMN profession VARCHAR(128)")
 
     if migration_statements:
         with engine.begin() as connection:
@@ -98,25 +116,53 @@ class AuthEngine:
     def get_password_hash(self, password):
         return pwd_context.hash(password)
 
-    def create_user(self, db, email, password):
+    def create_user(self, db, email, password, billing_plan=None, apple_sub=None):
         normalized_email = (email or "").strip().lower()
         hashed_password = self.get_password_hash(password)
         db_user = User(
             email=normalized_email,
             hashed_password=hashed_password,
             plan="free",
+            billing_plan=billing_plan,
             plan_expires_at=None,
+            apple_sub=apple_sub,
         )
         db.add(db_user)
         db.commit()
         db.refresh(db_user)
         return db_user
 
+    def update_user_profile(self, db, email, first_name=None, middle_name=None, last_name=None, profession=None):
+        user = self.get_user_by_email(db, email)
+        if not user:
+            return None
+
+        user.first_name = (first_name or "").strip() or None
+        user.middle_name = (middle_name or "").strip() or None
+        user.last_name = (last_name or "").strip() or None
+        user.profession = (profession or "").strip() or None
+
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+
     def get_user_by_email(self, db, email):
         normalized_email = (email or "").strip().lower()
         return (
             db.query(User)
             .filter(func.lower(User.email) == normalized_email)
+            .order_by(User.id.desc())
+            .first()
+        )
+
+    def get_user_by_apple_sub(self, db, apple_sub):
+        normalized_sub = (apple_sub or "").strip()
+        if not normalized_sub:
+            return None
+        return (
+            db.query(User)
+            .filter(User.apple_sub == normalized_sub)
             .order_by(User.id.desc())
             .first()
         )
@@ -147,6 +193,7 @@ class AuthEngine:
                 return False
             if (user.plan or "").lower() == "pro" and user.plan_expires_at and user.plan_expires_at <= datetime.utcnow():
                 user.plan = "free"
+                user.billing_plan = None
                 user.plan_expires_at = None
                 db.add(user)
                 db.commit()
@@ -173,6 +220,7 @@ class AuthEngine:
 
         duration_days = 365 if normalized_plan == "yearly" else 30
         user.plan = "pro"
+        user.billing_plan = normalized_plan
         user.plan_expires_at = datetime.utcnow() + timedelta(days=duration_days)
         db.add(user)
         db.commit()

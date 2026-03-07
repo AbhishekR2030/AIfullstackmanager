@@ -1,21 +1,54 @@
 :root {
-  /* Premium Dark Theme Palette */
-  --bg-primary: #0f1115;
-  --bg-secondary: #181b21;
-  --bg-card: #1e2229;
-  
-  --text-primary: #ffffff;
-  --text-secondary: #9ca3af;
-  --text-muted: #6b7280;
-  
-  --accent-primary: #3b82f6; /* Blue for trust/finance */
-  --accent-success: #10b981; /* Green for gains */
-  --accent-danger: #ef4444; /* Red for losses/risk */
-  --accent-warning: #f59e0b;
-  
-  --border-subtle: #2d3139;
-  
-  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", sans-serif;
+  --accent-primary: #4255d2;
+  --accent-secondary: #7d5df2;
+  --accent-success: #179853;
+  --accent-danger: #c73a47;
+  --accent-warning: #a66e00;
+}
+
+:root[data-app-theme='light'] {
+  color-scheme: light;
+  --bg-primary: #f3f5fb;
+  --bg-secondary: #edf1fb;
+  --bg-card: #ffffff;
+  --surface-page: #f3f5fb;
+  --surface-shell: linear-gradient(180deg, #fafbff 0%, #f3f5fc 58%, #f1f3fa 100%);
+  --surface-card: #ffffff;
+  --surface-muted: #f8faff;
+  --surface-elevated: #fbfcff;
+  --text-primary: #27314b;
+  --text-strong: #11192d;
+  --text-secondary: #667490;
+  --text-muted: #7c87a3;
+  --border-subtle: #dfe4f3;
+  --border-soft: #dfe4f3;
+  --border-strong: #d7dced;
+  --chip-neutral-bg: #eef2fb;
+  --shadow-soft: 0 10px 24px rgba(15, 23, 42, 0.08);
+  --overlay: rgba(14, 18, 31, 0.24);
+}
+
+:root[data-app-theme='dark'] {
+  color-scheme: dark;
+  --bg-primary: #09111f;
+  --bg-secondary: #0f1727;
+  --bg-card: #101a2d;
+  --surface-page: #09111f;
+  --surface-shell: linear-gradient(180deg, #0d1628 0%, #0a1323 56%, #08101d 100%);
+  --surface-card: #101a2d;
+  --surface-muted: #162238;
+  --surface-elevated: #19263f;
+  --text-primary: #e5ecff;
+  --text-strong: #f8fbff;
+  --text-secondary: #a8b7d6;
+  --text-muted: #8693af;
+  --border-subtle: #1d2942;
+  --border-soft: #20304a;
+  --border-strong: #2b3c5b;
+  --chip-neutral-bg: #162238;
+  --shadow-soft: 0 12px 28px rgba(1, 8, 20, 0.38);
+  --overlay: rgba(2, 8, 18, 0.6);
 }
 
 html, body {
@@ -24,7 +57,7 @@ html, body {
   height: 100%;
   min-height: 100%;
   width: 100%;
-  background-color: var(--bg-primary);
+  background: var(--surface-page);
   color: var(--text-primary);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
@@ -74,11 +107,11 @@ html, body {
 }
 
 .card {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-subtle);
+  background-color: var(--surface-card);
+  border: 1px solid var(--border-soft);
   border-radius: 1rem;
   padding: 1.5rem;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-soft);
 }
 
 .text-success { color: var(--accent-success); }

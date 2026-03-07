@@ -1,12 +1,14 @@
-
 import os
 import requests
 import secrets
+import hmac
+import hashlib
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status, Header, Query
 from fastapi.responses import RedirectResponse, JSONResponse
-from jose import JWTError, jwt
+from jose import JWTError, jwk, jwt
+from jose.utils import base64url_decode
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import timedelta, datetime
@@ -26,7 +28,13 @@ from app.utils.jwt_handler import (
     SECRET_KEY,
     ALGORITHM,
 )
-from app.utils.freemium import check_daily_limit, effective_plan, is_pro_user, standard_error_payload
+from app.utils.freemium import (
+    check_daily_limit,
+    effective_plan,
+    is_builder_email,
+    is_pro_user,
+    standard_error_payload,
+)
 
 router = APIRouter()
 
@@ -50,10 +58,33 @@ class Token(BaseModel):
 class GoogleLoginRequest(BaseModel):
     id_token: str
 
+class AppleLoginRequest(BaseModel):
+    identity_token: str
+    authorization_code: Optional[str] = None
+    email: Optional[str] = None
+    given_name: Optional[str] = None
+    family_name: Optional[str] = None
+    user: Optional[str] = None
+
 class ActivateProRequest(BaseModel):
     email: str
     plan: str
     payment_id: str
+
+class AccountProfileUpdateRequest(BaseModel):
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    last_name: Optional[str] = None
+    profession: Optional[str] = None
+
+class RazorpayOrderRequest(BaseModel):
+    plan: str
+
+class RazorpayVerifyRequest(BaseModel):
+    plan: str
+    order_id: str
+    payment_id: str
+    signature: str
 
 def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
@@ -91,10 +122,85 @@ def _issue_token_for_user(user) -> str:
             "sub": user.email,
             "uid": user.id,
             "plan": user_plan,
+            "billing_plan": getattr(user, "billing_plan", None),
             "plan_expires_at": user.plan_expires_at.isoformat() if user.plan_expires_at else None,
         },
         expires_delta=access_token_expires,
     )
+
+
+def _profile_initials(user) -> str:
+    first_name = (getattr(user, "first_name", "") or "").strip()
+    last_name = (getattr(user, "last_name", "") or "").strip()
+    email = (getattr(user, "email", "") or "").strip()
+
+    if first_name and last_name:
+        return f"{first_name[0]}{last_name[0]}".upper()
+    if first_name:
+        return first_name[:2].upper()
+    if email:
+        return email[:2].upper()
+    return "AS"
+
+
+def _safe_int(value: Optional[str], fallback: int) -> int:
+    try:
+        parsed = int(str(value).strip())
+        return parsed if parsed > 0 else fallback
+    except Exception:
+        return fallback
+
+
+def _resolve_rupee_price(rupees_env: str, paise_env: str, fallback_rupees: int) -> int:
+    rupees_value = (os.getenv(rupees_env, "") or "").strip()
+    if rupees_value:
+        return _safe_int(rupees_value, fallback_rupees)
+
+    paise_value = (os.getenv(paise_env, "") or "").strip()
+    if paise_value:
+        paise = _safe_int(paise_value, fallback_rupees * 100)
+        return max(1, round(paise / 100))
+
+    return fallback_rupees
+
+
+def _format_inr_label(rupees: int, cadence: str) -> str:
+    return f"Rs. {rupees:,} / {cadence}"
+
+
+def _razorpay_plan_catalog() -> Dict[str, Dict[str, Any]]:
+    monthly_rupees = _resolve_rupee_price("RAZORPAY_MONTHLY_PRICE_RUPEES", "RAZORPAY_MONTHLY_PRICE_PAISE", 499)
+    yearly_rupees = _resolve_rupee_price("RAZORPAY_YEARLY_PRICE_RUPEES", "RAZORPAY_YEARLY_PRICE_PAISE", 3999)
+    return {
+        "monthly": {
+            "amount": monthly_rupees * 100,
+            "price_rupees": monthly_rupees,
+            "currency": "INR",
+            "label": "Pro Monthly",
+            "price_label": _format_inr_label(monthly_rupees, "month"),
+            "description": "AlphaSeeker Pro Monthly",
+        },
+        "yearly": {
+            "amount": yearly_rupees * 100,
+            "price_rupees": yearly_rupees,
+            "currency": "INR",
+            "label": "Pro Yearly",
+            "price_label": _format_inr_label(yearly_rupees, "year"),
+            "description": "AlphaSeeker Pro Yearly",
+        },
+    }
+
+
+def _razorpay_credentials() -> tuple[str, str]:
+    return (
+        (os.getenv("RAZORPAY_KEY_ID", "") or "").strip(),
+        (os.getenv("RAZORPAY_KEY_SECRET", "") or "").strip(),
+    )
+
+
+def _is_razorpay_configured() -> bool:
+    key_id, key_secret = _razorpay_credentials()
+    return bool(key_id and key_secret)
 
 
 def require_pro(current_user=Depends(get_current_user)):
@@ -214,6 +320,155 @@ def _verify_google_id_token(id_token: str):
     return payload, None
 
 
+def _verify_apple_identity_token(identity_token: str):
+    """
+    Verifies Apple identity token signature and minimal claims.
+    """
+    if not identity_token:
+        return None, "Missing Apple identity token"
+
+    try:
+        headers = jwt.get_unverified_header(identity_token)
+        claims = jwt.get_unverified_claims(identity_token)
+    except Exception as exc:
+        return None, f"Invalid Apple identity token: {exc}"
+
+    try:
+        response = requests.get("https://appleid.apple.com/auth/keys", timeout=10)
+        response.raise_for_status()
+        apple_keys = response.json().get("keys", [])
+    except Exception as exc:
+        return None, f"Apple token verification failed: {exc}"
+
+    matching_key = next((item for item in apple_keys if item.get("kid") == headers.get("kid")), None)
+    if not matching_key:
+        return None, "Apple signing key not found"
+
+    try:
+        public_key = jwk.construct(matching_key)
+        signing_input, encoded_signature = identity_token.rsplit(".", 1)
+        decoded_signature = base64url_decode(encoded_signature.encode("utf-8"))
+        if not public_key.verify(signing_input.encode("utf-8"), decoded_signature):
+            return None, "Invalid Apple token signature"
+    except Exception as exc:
+        return None, f"Apple signature verification failed: {exc}"
+
+    if claims.get("iss") != "https://appleid.apple.com":
+        return None, "Invalid Apple token issuer"
+
+    allowed_audiences = {
+        value.strip()
+        for value in [
+            os.getenv("APPLE_CLIENT_ID", ""),
+            os.getenv("APPLE_SERVICE_ID", ""),
+            os.getenv("APPLE_IOS_CLIENT_ID", ""),
+            os.getenv("IOS_BUNDLE_ID", ""),
+            "com.alphaseeker.india",
+        ]
+        if value and value.strip()
+    }
+    audience = claims.get("aud")
+    if allowed_audiences and audience not in allowed_audiences:
+        return None, "Apple token audience mismatch"
+
+    expires_at = claims.get("exp")
+    try:
+        if expires_at and datetime.utcfromtimestamp(int(expires_at)) <= datetime.utcnow():
+            return None, "Apple token expired"
+    except Exception:
+        return None, "Apple token expiry is invalid"
+
+    if not claims.get("sub"):
+        return None, "Apple token missing subject"
+
+    return claims, None
+
+
+def _serialize_user_payload(user) -> Dict[str, Any]:
+    return {
+        "email": user.email,
+        "plan": effective_plan(user.plan, user.plan_expires_at, user.email),
+        "billing_plan": getattr(user, "billing_plan", None),
+        "plan_expires_at": user.plan_expires_at.isoformat() if user.plan_expires_at else None,
+        "first_name": getattr(user, "first_name", None),
+        "middle_name": getattr(user, "middle_name", None),
+        "last_name": getattr(user, "last_name", None),
+        "profession": getattr(user, "profession", None),
+    }
+
+
+def _plan_entitlements(plan: str) -> Dict[str, Any]:
+    normalized = (plan or "free").strip().lower()
+    is_pro_plan = normalized == "pro"
+    return {
+        "strategy_access": "all" if is_pro_plan else "core_only",
+        "strategies_count": 6 if is_pro_plan else 1,
+        "scans_per_day": None if is_pro_plan else 1,
+        "scan_result_cap": None if is_pro_plan else 10,
+        "ai_thesis_per_day": None if is_pro_plan else 3,
+        "ai_thesis_depth": "full" if is_pro_plan else "summary",
+        "broker_sync": is_pro_plan,
+        "broker_connectors": ["HDFC InvestRight", "Zerodha Kite"] if is_pro_plan else [],
+        "portfolio_holdings_limit": None if is_pro_plan else 10,
+        "portfolio_history_ranges": ["1m", "3m", "6m", "1y", "ytd", "all"] if is_pro_plan else ["1m"],
+        "sell_ranking": "composite" if is_pro_plan else "momentum_only",
+        "rebalancing": is_pro_plan,
+        "custom_thresholds": is_pro_plan,
+        "alerts": is_pro_plan,
+    }
+
+
+def _pricing_catalog() -> List[Dict[str, Any]]:
+    razorpay_catalog = _razorpay_plan_catalog()
+    return [
+        {
+            "id": "free",
+            "name": "Free",
+            "price_label": "Free forever",
+            "plan": "free",
+            "summary": "Core discovery and limited thesis access for evaluation.",
+            "checkout_plan": None,
+            "features": [
+                "Alphaseeker Core strategy only",
+                "1 scan per day with top 10 results",
+                "3 AI theses per day with summary depth",
+                "Up to 10 manual portfolio holdings",
+                "1M portfolio history",
+            ],
+        },
+        {
+            "id": "pro_monthly",
+            "name": "Pro Monthly",
+            "price_label": razorpay_catalog["monthly"]["price_label"],
+            "plan": "pro",
+            "billing_plan": "monthly",
+            "checkout_plan": "monthly",
+            "summary": "All institutional strategies, broker sync, and full portfolio intelligence.",
+            "features": [
+                "All 6 strategies including Citadel, Jane Street, Millennium, DE Shaw, Core, and Custom",
+                "Unlimited scans with full result list",
+                "Unlimited full-depth AI theses",
+                "Unlimited holdings with HDFC and Zerodha sync",
+                "Composite sell ranking, swap suggestions, custom thresholds, alerts, and all history ranges",
+            ],
+        },
+        {
+            "id": "pro_yearly",
+            "name": "Pro Yearly",
+            "price_label": razorpay_catalog["yearly"]["price_label"],
+            "plan": "pro",
+            "billing_plan": "yearly",
+            "checkout_plan": "yearly",
+            "summary": "Same Pro access with lower effective monthly cost and better retention economics.",
+            "features": [
+                "Everything in Pro Monthly",
+                "Lower annual effective price than 12 monthly renewals",
+                "Best fit for active users running regular portfolio reviews and broker sync",
+            ],
+        },
+    ]
+
+
 def _apply_free_thesis_redaction(payload: Dict[str, Any], force_refresh_requested: bool = False) -> Dict[str, Any]:
     """
     Preserve response shape while redacting premium thesis sections for free users.
@@ -262,11 +517,7 @@ async def signup(user: UserCreate, db: Session = Depends(auth_engine.get_db)):
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": {
-            "email": created_user.email,
-            "plan": effective_plan(created_user.plan, created_user.plan_expires_at, created_user.email),
-            "plan_expires_at": created_user.plan_expires_at.isoformat() if created_user.plan_expires_at else None,
-        },
+        "user": _serialize_user_payload(created_user),
     }
 
 @router.post("/auth/google", response_model=Token)
@@ -301,12 +552,63 @@ async def login_google(data: GoogleLoginRequest, db: Session = Depends(auth_engi
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": {
-            "email": user.email,
-            "plan": effective_plan(user.plan, user.plan_expires_at, user.email),
-            "plan_expires_at": user.plan_expires_at.isoformat() if user.plan_expires_at else None,
-        },
+        "user": _serialize_user_payload(user),
     }
+
+
+@router.post("/auth/apple", response_model=Token)
+async def login_apple(data: AppleLoginRequest, db: Session = Depends(auth_engine.get_db)):
+    payload, verify_error = _verify_apple_identity_token(data.identity_token)
+    if verify_error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=standard_error_payload(
+                code="INVALID_APPLE_TOKEN",
+                message=verify_error,
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            ),
+        )
+
+    apple_sub = (payload.get("sub") or "").strip()
+    email = _normalize_email(payload.get("email") or data.email or "")
+    user = auth_engine.get_user_by_apple_sub(db, apple_sub)
+
+    if not user and email:
+        user = auth_engine.get_user_by_email(db, email=email)
+        if user and not getattr(user, "apple_sub", None):
+            user.apple_sub = apple_sub
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+    if not user:
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=standard_error_payload(
+                    code="APPLE_EMAIL_REQUIRED",
+                    message="Apple did not return an email for this account. Use the same Apple account after initial consent or sign up with email first.",
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                ),
+            )
+        user = auth_engine.create_user(
+            db,
+            email=email,
+            password=secrets.token_urlsafe(32),
+            apple_sub=apple_sub,
+        )
+
+    access_token = _issue_token_for_user(user)
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": _serialize_user_payload(user),
+    }
+
+
+@router.get("/auth/apple/return")
+async def apple_return_placeholder():
+    return {"status": "ok", "message": "Apple sign-in return endpoint is configured."}
 
 class LoginRequest(BaseModel):
     email: str
@@ -328,11 +630,7 @@ async def login_json(data: LoginRequest, db: Session = Depends(auth_engine.get_d
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": {
-            "email": user.email,
-            "plan": effective_plan(user.plan, user.plan_expires_at, user.email),
-            "plan_expires_at": user.plan_expires_at.isoformat() if user.plan_expires_at else None,
-        },
+        "user": _serialize_user_payload(user),
     }
 
 @router.get("/auth/me")
@@ -346,7 +644,278 @@ async def read_users_me(current_user = Depends(get_current_user)):
         "email": current_user.email,
         "id": current_user.id,
         "plan": user_plan,
+        "billing_plan": getattr(current_user, "billing_plan", None),
         "plan_expires_at": current_user.plan_expires_at.isoformat() if current_user.plan_expires_at else None,
+        "is_builder": is_builder_email(current_user.email),
+    }
+
+
+@router.get("/account/profile")
+async def get_account_profile(current_user=Depends(get_current_user)):
+    active_plan = effective_plan(
+        getattr(current_user, "plan", "free"),
+        getattr(current_user, "plan_expires_at", None),
+        getattr(current_user, "email", None),
+    )
+    is_builder = is_builder_email(current_user.email)
+
+    return {
+        "profile": {
+            "email": current_user.email,
+            "id": current_user.id,
+            "plan": active_plan,
+            "billing_plan": getattr(current_user, "billing_plan", None),
+            "plan_expires_at": current_user.plan_expires_at.isoformat() if current_user.plan_expires_at else None,
+            "is_builder": is_builder,
+            "initials": _profile_initials(current_user),
+            "first_name": getattr(current_user, "first_name", None),
+            "middle_name": getattr(current_user, "middle_name", None),
+            "last_name": getattr(current_user, "last_name", None),
+            "profession": getattr(current_user, "profession", None),
+        },
+        "subscription": {
+            "status": "active" if active_plan == "pro" else "inactive",
+            "plan": active_plan,
+            "billing_plan": getattr(current_user, "billing_plan", None),
+            "source": "builder_override" if is_builder else ("billing" if active_plan == "pro" else "none"),
+            "renews_at": current_user.plan_expires_at.isoformat() if current_user.plan_expires_at else None,
+            "entitlements": _plan_entitlements(active_plan),
+            "can_subscribe": active_plan != "pro" and not is_builder,
+            "payment_provider": "razorpay" if _is_razorpay_configured() else None,
+        },
+        "pricing": _pricing_catalog(),
+    }
+
+
+@router.put("/account/profile")
+async def update_account_profile(
+    payload: AccountProfileUpdateRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(auth_engine.get_db),
+):
+    updated_user = auth_engine.update_user_profile(
+        db,
+        email=current_user.email,
+        first_name=payload.first_name,
+        middle_name=payload.middle_name,
+        last_name=payload.last_name,
+        profession=payload.profession,
+    )
+    if not updated_user:
+        return _error_response(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="USER_NOT_FOUND",
+            message="User does not exist.",
+        )
+
+    active_plan = effective_plan(
+        getattr(updated_user, "plan", "free"),
+        getattr(updated_user, "plan_expires_at", None),
+        getattr(updated_user, "email", None),
+    )
+
+    return {
+        "status": "ok",
+        "profile": {
+            "email": updated_user.email,
+            "id": updated_user.id,
+            "plan": active_plan,
+            "billing_plan": getattr(updated_user, "billing_plan", None),
+            "plan_expires_at": updated_user.plan_expires_at.isoformat() if updated_user.plan_expires_at else None,
+            "is_builder": is_builder_email(updated_user.email),
+            "initials": _profile_initials(updated_user),
+            "first_name": getattr(updated_user, "first_name", None),
+            "middle_name": getattr(updated_user, "middle_name", None),
+            "last_name": getattr(updated_user, "last_name", None),
+            "profession": getattr(updated_user, "profession", None),
+        },
+    }
+
+
+@router.post("/billing/razorpay/order")
+async def create_razorpay_order(payload: RazorpayOrderRequest, current_user=Depends(get_current_user)):
+    active_plan = effective_plan(
+        getattr(current_user, "plan", "free"),
+        getattr(current_user, "plan_expires_at", None),
+        getattr(current_user, "email", None),
+    )
+    if is_builder_email(current_user.email):
+        return _error_response(
+            status_code=status.HTTP_409_CONFLICT,
+            code="BUILDER_OVERRIDE",
+            message="Builder access already includes Pro entitlements.",
+        )
+    if active_plan == "pro":
+        return _error_response(
+            status_code=status.HTTP_409_CONFLICT,
+            code="PLAN_ALREADY_ACTIVE",
+            message="Your Pro subscription is already active.",
+        )
+
+    normalized_plan = (payload.plan or "").strip().lower()
+    plan_config = _razorpay_plan_catalog().get(normalized_plan)
+    if not plan_config:
+        return _error_response(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_PLAN",
+            message="plan must be either 'monthly' or 'yearly'.",
+        )
+
+    key_id, key_secret = _razorpay_credentials()
+    if not key_id or not key_secret:
+        return _error_response(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="PAYMENT_NOT_CONFIGURED",
+            message="Razorpay is not configured yet.",
+        )
+
+    receipt = f"alpha-{(current_user.id or 0)}-{normalized_plan}-{int(datetime.utcnow().timestamp())}"
+    order_payload = {
+        "amount": plan_config["amount"],
+        "currency": plan_config["currency"],
+        "receipt": receipt,
+        "notes": {
+            "user_email": current_user.email,
+            "billing_plan": normalized_plan,
+        },
+    }
+
+    try:
+        response = requests.post(
+            "https://api.razorpay.com/v1/orders",
+            json=order_payload,
+            auth=(key_id, key_secret),
+            timeout=15,
+        )
+        response.raise_for_status()
+        order_data = response.json()
+    except Exception as exc:
+        return _error_response(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code="PAYMENT_GATEWAY_ERROR",
+            message=f"Failed to create Razorpay order: {exc}",
+        )
+
+    return {
+        "provider": "razorpay",
+        "key_id": key_id,
+        "order_id": order_data.get("id"),
+        "amount": plan_config["amount"],
+        "currency": plan_config["currency"],
+        "plan": normalized_plan,
+        "name": "AlphaSeeker",
+        "description": plan_config["description"],
+        "prefill": {
+            "email": current_user.email,
+        },
+        "theme": {
+            "color": "#4255d2",
+        },
+    }
+
+
+@router.post("/billing/razorpay/verify")
+async def verify_razorpay_payment(
+    payload: RazorpayVerifyRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(auth_engine.get_db),
+):
+    normalized_plan = (payload.plan or "").strip().lower()
+    if normalized_plan not in {"monthly", "yearly"}:
+        return _error_response(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_PLAN",
+            message="plan must be either 'monthly' or 'yearly'.",
+        )
+
+    key_id, key_secret = _razorpay_credentials()
+    if not key_id or not key_secret:
+        return _error_response(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="PAYMENT_NOT_CONFIGURED",
+            message="Razorpay is not configured yet.",
+        )
+
+    signing_payload = f"{payload.order_id}|{payload.payment_id}"
+    expected_signature = hmac.new(
+        key_secret.encode("utf-8"),
+        signing_payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not secrets.compare_digest(expected_signature, (payload.signature or "").strip()):
+        return _error_response(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_PAYMENT_SIGNATURE",
+            message="Payment signature verification failed.",
+        )
+
+    try:
+        payment_response = requests.get(
+            f"https://api.razorpay.com/v1/payments/{payload.payment_id}",
+            auth=(key_id, key_secret),
+            timeout=15,
+        )
+        payment_response.raise_for_status()
+        payment = payment_response.json()
+
+        order_response = requests.get(
+            f"https://api.razorpay.com/v1/orders/{payload.order_id}",
+            auth=(key_id, key_secret),
+            timeout=15,
+        )
+        order_response.raise_for_status()
+        order = order_response.json()
+    except Exception as exc:
+        return _error_response(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code="PAYMENT_GATEWAY_ERROR",
+            message=f"Failed to confirm Razorpay payment: {exc}",
+        )
+
+    if (payment.get("order_id") or "").strip() != payload.order_id.strip():
+        return _error_response(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="ORDER_MISMATCH",
+            message="Payment order mismatch.",
+        )
+
+    payment_status = (payment.get("status") or "").strip().lower()
+    if payment_status not in {"authorized", "captured"}:
+        return _error_response(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="PAYMENT_NOT_CAPTURED",
+            message="Payment is not yet completed.",
+        )
+
+    order_notes = order.get("notes") or {}
+    if _normalize_email(order_notes.get("user_email")) != _normalize_email(current_user.email):
+        return _error_response(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="PAYMENT_USER_MISMATCH",
+            message="This payment does not belong to the signed-in user.",
+        )
+    if (order_notes.get("billing_plan") or "").strip().lower() != normalized_plan:
+        return _error_response(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="PAYMENT_PLAN_MISMATCH",
+            message="Plan mismatch for the verified payment.",
+        )
+
+    activated_user = auth_engine.activate_pro_plan(db, email=current_user.email, billing_plan=normalized_plan)
+    if not activated_user:
+        return _error_response(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="USER_NOT_FOUND",
+            message="User does not exist.",
+        )
+
+    return {
+        "status": "ok",
+        "plan": activated_user.plan,
+        "billing_plan": getattr(activated_user, "billing_plan", None),
+        "plan_expires_at": activated_user.plan_expires_at.isoformat() if activated_user.plan_expires_at else None,
+        "payment_id": payload.payment_id,
+        "order_id": payload.order_id,
     }
 
 
@@ -979,15 +1548,30 @@ async def scan_opportunities(
         # If we have sell candidates and buy candidates, create swap suggestions
         swap_opportunities = []
         if recommendations['sell_candidates'] and buy_candidates:
-            sorted_sells = sorted(recommendations['sell_candidates'], key=lambda x: x.get('pl_percent', 0))
-            top_buy = buy_candidates[0]
-            
+            sorted_sells = sorted(
+                recommendations['sell_candidates'],
+                key=lambda item: item.get('sell_urgency_score', 0),
+                reverse=True,
+            )
+            ranked_buys = sorted(
+                buy_candidates,
+                key=lambda item: float(item.get('score', item.get('upside_score', 0)) or 0),
+                reverse=True,
+            )
+
             for index, sell in enumerate(sorted_sells):
+                if index >= len(ranked_buys):
+                    break
+                ranked_buy = ranked_buys[index]
                 swap_opportunities.append({
                     "priority": index + 1,
                     "sell": sell.get('ticker', 'UNKNOWN'),
-                    "buy": top_buy.get('ticker', 'UNKNOWN'),
-                    "reason": f"Sell weak {sell.get('ticker')} (Trend {sell.get('trend')}, Returns {sell.get('pl_percent')}%) to buy strong {top_buy.get('ticker')} (Momentum Score {top_buy.get('score')})"
+                    "buy": ranked_buy.get('ticker', 'UNKNOWN'),
+                    "reason": (
+                        f"Rotate out of {sell.get('ticker')} "
+                        f"(urgency {sell.get('sell_urgency_score', 0)}) into ranked candidate "
+                        f"{ranked_buy.get('ticker')} (score {ranked_buy.get('score', ranked_buy.get('upside_score', 0))})."
+                    ),
                 })
         
         strategy_metadata = market_scanner.get_strategy_payload(strategy)

@@ -1,20 +1,20 @@
 html.discovery-theme,
 body.discovery-theme {
-    background: #f3f5fb !important;
-    color: #182036 !important;
+    background: var(--surface-page) !important;
+    color: var(--text-primary) !important;
     padding-top: 0 !important;
     padding-bottom: 0 !important;
 }
 
 .discovery-native-page {
     animation: discoveryFadeIn 0.3s ease-out;
-    background: linear-gradient(180deg, #fafbff 0%, #f3f5fc 58%, #f1f3fa 100%);
-    border: 1px solid #e5e8f2;
+    background: var(--surface-shell);
+    border: 1px solid var(--border-soft);
     border-radius: 24px;
     padding: 1.1rem;
-    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", sans-serif;
-    color: #1b243d;
+    box-shadow: var(--shadow-soft);
+    font-family: var(--font-sans);
+    color: var(--text-primary);
 }
 
 @keyframes discoveryFadeIn {
@@ -34,8 +34,8 @@ body.discovery-theme {
 .discovery-status-card,
 .ideas-section,
 .replacement-section {
-    background: #ffffff;
-    border: 1px solid #dfe4f3;
+    background: var(--surface-card);
+    border: 1px solid var(--border-soft);
     border-radius: 20px;
     padding: 0.95rem;
 }
@@ -56,13 +56,13 @@ body.discovery-theme {
     margin-top: 0.58rem;
     display: inline-flex;
     align-items: center;
-    border: 1px solid #dbe1f1;
+    border: 1px solid var(--border-strong);
     border-radius: 999px;
     padding: 0.18rem 0.55rem;
     font-size: 0.66rem;
     font-weight: 560;
-    color: #7080a3;
-    background: #f8faff;
+    color: var(--text-muted);
+    background: var(--surface-muted);
 }
 
 .strategy-source-chip.live {
@@ -104,11 +104,11 @@ body.discovery-theme {
 
 .strategy-tab {
     flex: 0 0 auto;
-    border: 1px solid #dbe1f1;
+    border: 1px solid var(--border-strong);
     border-radius: 12px;
     padding: 0.5rem 0.74rem;
-    background: #f9fbff;
-    color: #697391;
+    background: var(--surface-muted);
+    color: var(--text-secondary);
     font-size: 0.77rem;
     font-weight: 630;
     white-space: nowrap;
@@ -116,9 +116,9 @@ body.discovery-theme {
 }
 
 .strategy-tab.active {
-    background: #101421;
-    border-color: #101421;
-    color: #ffffff;
+    background: var(--text-strong);
+    border-color: var(--text-strong);
+    color: var(--surface-card);
 }
 
 .strategy-panel-head {
@@ -132,12 +132,12 @@ body.discovery-theme {
     margin: 0;
     font-size: 1.02rem;
     font-weight: 680;
-    color: #1e2744;
+    color: var(--text-strong);
 }
 
 .strategy-panel-head p {
     margin: 0.22rem 0 0;
-    color: #6f7f9f;
+    color: var(--text-secondary);
     font-size: 0.82rem;
 }
 
@@ -155,9 +155,9 @@ body.discovery-theme {
     align-items: center;
     justify-content: center;
     gap: 0.35rem;
-    border: 1px solid #d6dced;
-    background: #f7f9ff;
-    color: #4b5676;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-muted);
+    color: var(--text-primary);
     font-size: 0.79rem;
     font-weight: 620;
     cursor: pointer;
@@ -180,7 +180,7 @@ body.discovery-theme {
     display: inline-flex;
     align-items: center;
     gap: 0.36rem;
-    color: #55658e;
+    color: var(--text-secondary);
     font-size: 0.8rem;
     font-weight: 620;
 }
@@ -188,7 +188,7 @@ body.discovery-theme {
 .strategy-details-list {
     margin: 0.48rem 0 0;
     padding-left: 1rem;
-    color: #516087;
+    color: var(--text-secondary);
     font-size: 0.79rem;
     line-height: 1.42;
 }
@@ -200,7 +200,7 @@ body.discovery-theme {
 .scan-meta-strip {
     margin-top: 0.62rem;
     padding-top: 0.58rem;
-    border-top: 1px dashed #d9e0f2;
+    border-top: 1px dashed var(--border-strong);
     display: flex;
     flex-wrap: wrap;
     gap: 0.35rem;
@@ -209,11 +209,11 @@ body.discovery-theme {
 .scan-meta-strip span {
     display: inline-flex;
     align-items: center;
-    border: 1px solid #dbe2f4;
+    border: 1px solid var(--border-strong);
     border-radius: 999px;
     padding: 0.15rem 0.48rem;
-    background: #f8faff;
-    color: #5b6a92;
+    background: var(--surface-muted);
+    color: var(--text-secondary);
     font-size: 0.65rem;
     font-weight: 560;
 }
@@ -226,7 +226,7 @@ body.discovery-theme {
     text-align: center;
     min-height: 102px;
     gap: 0.4rem;
-    color: #4c587a;
+    color: var(--text-secondary);
 }
 
 .discovery-status-card.error {
@@ -247,11 +247,11 @@ body.discovery-theme {
     margin: 0;
     font-size: 1.08rem;
     font-weight: 690;
-    color: #1b243d;
+    color: var(--text-strong);
 }
 
 .section-head span {
-    color: #7b86a3;
+    color: var(--text-muted);
     font-size: 0.74rem;
     font-weight: 540;
 }
@@ -263,9 +263,9 @@ body.discovery-theme {
 }
 
 .idea-card {
-    border: 1px solid #d8e1f0;
+    border: 1px solid var(--border-soft);
     border-radius: 16px;
-    background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%);
+    background: linear-gradient(180deg, var(--surface-card) 0%, var(--surface-muted) 100%);
     padding: 0.75rem;
     min-height: 202px;
     display: flex;
@@ -289,7 +289,7 @@ body.discovery-theme {
     margin: 0;
     font-size: 1rem;
     font-weight: 700;
-    color: #182036;
+    color: var(--text-strong);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -297,7 +297,7 @@ body.discovery-theme {
 
 .idea-card-top p {
     margin: 0.14rem 0 0;
-    color: #7a849f;
+    color: var(--text-muted);
     font-size: 0.74rem;
 }
 
@@ -334,12 +334,12 @@ body.discovery-theme {
 .idea-pricing-grid span {
     display: block;
     font-size: 0.7rem;
-    color: #7a849f;
+    color: var(--text-muted);
     margin-bottom: 0.11rem;
 }
 
 .idea-pricing-grid strong {
-    color: #1f2a4c;
+    color: var(--text-primary);
     font-size: 0.78rem;
     font-weight: 560;
 }
@@ -352,9 +352,9 @@ body.discovery-theme {
 }
 
 .metric-chip {
-    border: 1px solid #dbe2f6;
-    background: #f2f5ff;
-    color: #51608a;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-muted);
+    color: var(--text-secondary);
     padding: 0.22rem 0.45rem;
     border-radius: 10px;
     font-size: 0.67rem;
@@ -367,10 +367,10 @@ body.discovery-theme {
 
 .idea-watchlist-btn {
     margin-top: 0.18rem;
-    border: 1px solid #cfd7ee;
+    border: 1px solid var(--border-strong);
     border-radius: 12px;
-    background: #f8faff;
-    color: #33436b;
+    background: var(--surface-muted);
+    color: var(--text-primary);
     font-size: 0.77rem;
     font-weight: 640;
     padding: 0.52rem 0.6rem;
@@ -393,9 +393,9 @@ body.discovery-theme {
 }
 
 .replacement-item {
-    border: 1px solid #dbe2f2;
+    border: 1px solid var(--border-soft);
     border-radius: 14px;
-    background: linear-gradient(180deg, #ffffff 0%, #f8faff 100%);
+    background: linear-gradient(180deg, var(--surface-card) 0%, var(--surface-muted) 100%);
     padding: 0.72rem;
 }
 
@@ -408,8 +408,8 @@ body.discovery-theme {
 
 .replacement-rank {
     border-radius: 999px;
-    background: #101421;
-    color: #ffffff;
+    background: var(--text-strong);
+    color: var(--surface-card);
     padding: 0.12rem 0.42rem;
     font-size: 0.66rem;
     font-weight: 600;
@@ -419,7 +419,7 @@ body.discovery-theme {
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
-    color: #223056;
+    color: var(--text-primary);
     font-size: 0.8rem;
     min-width: 0;
     flex: 1 1 auto;
@@ -442,15 +442,15 @@ body.discovery-theme {
 
 .replacement-toggle-btn {
     flex: 0 0 auto;
-    border: 1px solid #d6dced;
+    border: 1px solid var(--border-strong);
     border-radius: 10px;
     width: 28px;
     height: 28px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    background: #f7f9ff;
-    color: #4a587d;
+    background: var(--surface-muted);
+    color: var(--text-secondary);
     cursor: pointer;
     margin-left: 0.2rem;
 }
@@ -462,14 +462,14 @@ body.discovery-theme {
 
 .replacement-reason {
     margin: 0.46rem 0 0.46rem;
-    color: #3f4f78;
+    color: var(--text-primary);
     font-size: 0.78rem;
     font-weight: 570;
 }
 
 .replacement-collapsed-hint {
     margin: 0.5rem 0 0;
-    color: #6f7c9d;
+    color: var(--text-muted);
     font-size: 0.72rem;
 }
 
@@ -485,23 +485,23 @@ body.discovery-theme {
     display: inline-flex;
     align-items: flex-start;
     gap: 0.34rem;
-    color: #566289;
+    color: var(--text-secondary);
     font-size: 0.74rem;
 }
 
 .replacement-target {
     margin-top: 0.48rem;
     font-size: 0.73rem;
-    color: #4f5b82;
+    color: var(--text-secondary);
 }
 
 .replacement-target strong {
-    color: #21325a;
+    color: var(--text-primary);
     font-weight: 560;
 }
 
 .muted {
-    color: #7c859d;
+    color: var(--text-muted);
     font-size: 0.84rem;
 }
 
@@ -509,8 +509,8 @@ body.discovery-theme {
     width: 22px;
     height: 22px;
     border-radius: 999px;
-    border: 2px solid #d7dced;
-    border-top-color: #4255d2;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent-primary);
     animation: spin 0.85s linear infinite;
 }
 

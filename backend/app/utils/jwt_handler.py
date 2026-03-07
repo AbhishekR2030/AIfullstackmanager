@@ -20,7 +20,12 @@ class AuthenticatedUser(BaseModel):
     id: Optional[int] = None
     email: str
     plan: str = "free"
+    billing_plan: Optional[str] = None
     plan_expires_at: Optional[datetime] = None
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    last_name: Optional[str] = None
+    profession: Optional[str] = None
     is_active: bool = True
 
 
@@ -62,22 +67,31 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
             raise credentials_exception
         user_id = payload.get("uid")
         plan = (payload.get("plan") or "").strip().lower()
+        billing_plan = payload.get("billing_plan")
         expiry = _parse_plan_expiry(payload.get("plan_expires_at"))
+        first_name = payload.get("first_name")
+        middle_name = payload.get("middle_name")
+        last_name = payload.get("last_name")
+        profession = payload.get("profession")
     except JWTError:
         raise credentials_exception
 
-    # Backward compatibility for previously issued tokens without plan claims.
-    if not plan:
-        db = SessionLocal()
-        try:
-            db_user = auth_engine.get_user_by_email(db, email=email)
-            if db_user is None:
-                raise credentials_exception
-            user_id = db_user.id
+    db = SessionLocal()
+    try:
+        db_user = auth_engine.get_user_by_email(db, email=email)
+        if db_user is None:
+            raise credentials_exception
+        user_id = db_user.id
+        if not plan or billing_plan is None:
             plan = auth_engine.get_effective_plan(db_user)
+            billing_plan = getattr(db_user, "billing_plan", None)
             expiry = db_user.plan_expires_at
-        finally:
-            db.close()
+        first_name = getattr(db_user, "first_name", None)
+        middle_name = getattr(db_user, "middle_name", None)
+        last_name = getattr(db_user, "last_name", None)
+        profession = getattr(db_user, "profession", None)
+    finally:
+        db.close()
 
     resolved_plan = effective_plan(plan, expiry, email=email)
     if (
@@ -92,6 +106,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         id=user_id,
         email=email,
         plan=resolved_plan if resolved_plan in {"free", "pro"} else "free",
+        billing_plan=billing_plan,
         plan_expires_at=expiry,
+        first_name=first_name,
+        middle_name=middle_name,
+        last_name=last_name,
+        profession=profession,
         is_active=True,
     )

@@ -9,6 +9,7 @@ import Portfolio from './pages/Portfolio';
 import Login from './pages/Login';
 import { restoreAuth } from './services/authStorage';
 import api from './services/api';
+import { getStoredTheme, initializeTheme, THEME_UPDATED_EVENT } from './services/theme';
 
 // Auth Guard Component
 const ProtectedRoute = ({ children }) => {
@@ -28,14 +29,24 @@ function App() {
     // Customize Status Bar for iOS
     const configureStatusBar = async () => {
       try {
-        await StatusBar.setStyle({ style: Style.Dark });
-        // Optional: Set background color if needed for Android/other platforms
-        // await StatusBar.setBackgroundColor({ color: '#0f1115' });
+        const applyStatusBarStyle = async () => {
+          const theme = getStoredTheme();
+          await StatusBar.setStyle({ style: theme === 'dark' ? Style.Light : Style.Dark });
+        };
+
+        initializeTheme();
+        await applyStatusBarStyle();
+        const handleThemeUpdated = () => applyStatusBarStyle();
+        window.addEventListener(THEME_UPDATED_EVENT, handleThemeUpdated);
+        return () => window.removeEventListener(THEME_UPDATED_EVENT, handleThemeUpdated);
       } catch (err) {
         console.log("Status Bar plugin not available (web mode)", err);
       }
     };
-    configureStatusBar();
+    const cleanupPromise = configureStatusBar();
+    return () => {
+      Promise.resolve(cleanupPromise).then((cleanup) => cleanup && cleanup()).catch(() => {});
+    };
   }, []);
 
   useEffect(() => {

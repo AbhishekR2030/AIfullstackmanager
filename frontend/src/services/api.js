@@ -66,6 +66,56 @@ export const loginWithGoogle = async (idToken) => {
     }
 };
 
+export const loginWithApple = async (payload) => {
+    try {
+        const response = await api.post('/auth/apple', payload);
+        return response.data;
+    } catch (error) {
+        console.error("Error logging in with Apple:", error);
+        throw error;
+    }
+};
+
+export const fetchAccountProfile = async () => {
+    try {
+        const response = await api.get('/account/profile');
+        return response.data;
+    } catch (error) {
+        console.error("Error fetching account profile:", error);
+        throw error;
+    }
+};
+
+export const updateAccountProfile = async (payload) => {
+    try {
+        const response = await api.put('/account/profile', payload);
+        return response.data;
+    } catch (error) {
+        console.error("Error updating account profile:", error);
+        throw error;
+    }
+};
+
+export const createRazorpayOrder = async (plan) => {
+    try {
+        const response = await api.post('/billing/razorpay/order', { plan });
+        return response.data;
+    } catch (error) {
+        console.error("Error creating Razorpay order:", error);
+        throw error;
+    }
+};
+
+export const verifyRazorpayPayment = async (payload) => {
+    try {
+        const response = await api.post('/billing/razorpay/verify', payload);
+        return response.data;
+    } catch (error) {
+        console.error("Error verifying Razorpay payment:", error);
+        throw error;
+    }
+};
+
 export const getPortfolio = async () => {
     try {
         const response = await api.get('/portfolio');
