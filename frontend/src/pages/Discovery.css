@@ -52,6 +52,31 @@ body.discovery-theme {
     margin-top: 0;
 }
 
+.strategy-source-chip {
+    margin-top: 0.58rem;
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid #dbe1f1;
+    border-radius: 999px;
+    padding: 0.18rem 0.55rem;
+    font-size: 0.66rem;
+    font-weight: 560;
+    color: #7080a3;
+    background: #f8faff;
+}
+
+.strategy-source-chip.live {
+    border-color: #cae7d6;
+    color: #1a7f4b;
+    background: #ecf9f2;
+}
+
+.strategy-source-chip.fallback {
+    border-color: #e6ddc7;
+    color: #8b6b1e;
+    background: #fff8e6;
+}
+
 .discovery-title-card h1 {
     margin: 0;
     font-size: 1.24rem;
@@ -170,6 +195,27 @@ body.discovery-theme {
 
 .strategy-details-list li + li {
     margin-top: 0.24rem;
+}
+
+.scan-meta-strip {
+    margin-top: 0.62rem;
+    padding-top: 0.58rem;
+    border-top: 1px dashed #d9e0f2;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.scan-meta-strip span {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid #dbe2f4;
+    border-radius: 999px;
+    padding: 0.15rem 0.48rem;
+    background: #f8faff;
+    color: #5b6a92;
+    font-size: 0.65rem;
+    font-weight: 560;
 }
 
 .discovery-status-card {

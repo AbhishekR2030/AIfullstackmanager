@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+    fetchDiscoveryStrategies,
     fetchDiscoveryScan,
     triggerAsyncDiscoveryScan,
     getAsyncDiscoveryStatus,
@@ -34,11 +35,22 @@ const DISCOVERY_STATE_STORAGE_KEY = 'alphaseeker_discovery_state';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const STRATEGY_PRESETS = [
+const FALLBACK_STRATEGY_PRESETS = [
+    {
+        id: 'core',
+        label: 'Alphaseeker Core',
+        description: 'Balanced momentum + quality composite baseline.',
+        details: [
+            'Balanced score blending technical momentum and fundamental quality.',
+            'Designed as the default core scanner with broad market compatibility.',
+            'No manual threshold tuning required for baseline discovery scans.',
+        ],
+        thresholds: null,
+    },
     {
         id: 'custom',
-        label: 'Custom Trade',
-        description: 'Use your own thresholds and scan logic.',
+        label: 'Custom Thresholds',
+        description: 'User-defined thresholds and scan logic.',
         details: [
             'Define your RSI, volatility, volume-shock, and fundamentals limits.',
             'Scanner applies your thresholds to identify liquid momentum candidates.',
@@ -61,13 +73,13 @@ const STRATEGY_PRESETS = [
         },
     },
     {
-        id: 'janestreet_quant',
-        label: 'Jane Street',
-        description: 'Short-term flow and mean-reversion blend.',
+        id: 'jane_street_stat',
+        label: 'Jane Street Statistical',
+        description: 'Pairs-trading and mean-reversion inspired blend.',
         details: [
-            'Combines flow-based momentum with mean-reversion risk checks.',
-            'Allows wider RSI/volatility bands to capture tactical dislocations.',
-            'Targets opportunities where short-term pricing inefficiency can normalize.',
+            'Combines mean-reversion checks with tactical flow and momentum signals.',
+            'Targets spread dislocations with sector-relative technical context.',
+            'Designed for short-horizon statistical opportunity capture.',
         ],
         thresholds: {
             technical: { rsi_min: 38, rsi_max: 62, volatility_min: 2, volatility_max: 11, volume_shock_min: 1.2, volume_shock_max: 8.0 },
@@ -75,13 +87,27 @@ const STRATEGY_PRESETS = [
         },
     },
     {
-        id: 'deshaw_quality',
-        label: 'DE Shaw Quality',
-        description: 'Profitability and balance-sheet driven screen.',
+        id: 'millennium_quality',
+        label: 'Millennium Quality',
+        description: 'Quality-factor focused profitability and balance-sheet screen.',
         details: [
-            'Prioritizes stronger ROE/ROCE and cleaner leverage profile.',
-            'Filters out low-quality spikes that fail fundamental discipline.',
-            'Useful for high-quality swing allocations.',
+            'Emphasizes ROE/ROCE strength, profitability quality, and earnings stability.',
+            'Penalizes weak balance sheets and high leverage outliers.',
+            'Aligned with quality-factor style allocation logic for robust names.',
+        ],
+        thresholds: {
+            technical: { rsi_min: 48, rsi_max: 66, volatility_min: 2.5, volatility_max: 8, volume_shock_min: 1.4, volume_shock_max: 5.0 },
+            fundamental: { revenue_growth_min: 12, revenue_growth_max: 150, profit_growth_min: 12, profit_growth_max: 150, roe_min: 16, roe_max: 100, roce_min: 16, roce_max: 100, debt_equity_min: 0, debt_equity_max: 80 },
+        },
+    },
+    {
+        id: 'de_shaw_multifactor',
+        label: 'DE Shaw Multi-Factor',
+        description: 'Quality, momentum, and valuation balanced screen.',
+        details: [
+            'Blends trend strength with profitability and valuation discipline.',
+            'Filters out low-quality spikes that fail balance-sheet checks.',
+            'Designed for robust multi-factor swing allocations.',
         ],
         thresholds: {
             technical: { rsi_min: 48, rsi_max: 66, volatility_min: 2.5, volatility_max: 8, volume_shock_min: 1.4, volume_shock_max: 5.0 },
@@ -90,10 +116,22 @@ const STRATEGY_PRESETS = [
     },
 ];
 
-const STRATEGY_LOOKUP = STRATEGY_PRESETS.reduce((acc, strategy) => {
-    acc[strategy.id] = strategy;
-    return acc;
-}, {});
+const LEGACY_STRATEGY_IDS = {
+    alphaseeker_core: 'core',
+    janestreet_quant: 'jane_street_stat',
+    jane_street: 'jane_street_stat',
+    deshaw_quality: 'de_shaw_multifactor',
+    de_shaw_quality: 'de_shaw_multifactor',
+    custom_trade: 'custom',
+};
+
+const normalizeStrategyId = (strategyId) => {
+    const normalized = (strategyId || '').trim();
+    if (!normalized) {
+        return 'custom';
+    }
+    return LEGACY_STRATEGY_IDS[normalized] || normalized;
+};
 
 const safeParse = (raw, fallback) => {
     if (!raw) {
@@ -104,6 +142,33 @@ const safeParse = (raw, fallback) => {
     } catch {
         return fallback;
     }
+};
+
+const resolveDiscoveryErrorMessage = (error) => {
+    if (!error) {
+        return 'Failed to scan market. Please try again.';
+    }
+
+    const responseData = error?.response?.data;
+    if (typeof responseData === 'string' && responseData.trim()) {
+        return responseData.trim();
+    }
+    if (typeof responseData?.detail === 'string' && responseData.detail.trim()) {
+        return responseData.detail.trim();
+    }
+    if (typeof responseData?.message === 'string' && responseData.message.trim()) {
+        return responseData.message.trim();
+    }
+    if (typeof responseData?.error?.message === 'string' && responseData.error.message.trim()) {
+        return responseData.error.message.trim();
+    }
+    if (error?.message === 'Network Error') {
+        return 'Unable to reach the screening service. Please retry in a few seconds.';
+    }
+    if (typeof error?.message === 'string' && error.message.trim()) {
+        return error.message.trim();
+    }
+    return 'Failed to scan market. Please try again.';
 };
 
 const normalizeTicker = (ticker) => (ticker || '').trim().toUpperCase();
@@ -124,7 +189,25 @@ const getEffectiveThresholds = (strategyId, customThresholds) => {
     if (strategyId === 'custom') {
         return customThresholds;
     }
-    return STRATEGY_LOOKUP[strategyId]?.thresholds || customThresholds;
+    return null;
+};
+
+const mapBackendStrategies = (backendStrategies) => {
+    if (!Array.isArray(backendStrategies) || backendStrategies.length === 0) {
+        return FALLBACK_STRATEGY_PRESETS;
+    }
+    return backendStrategies.map((strategy) => {
+        const id = normalizeStrategyId(strategy?.strategy_id || strategy?.id || 'core');
+        return {
+            id,
+            label: strategy?.strategy_label || strategy?.label || id,
+            description: strategy?.strategy_summary || strategy?.description || 'Strategy scan',
+            details: Array.isArray(strategy?.strategy_logic) && strategy.strategy_logic.length
+                ? strategy.strategy_logic
+                : ['Strategy logic details unavailable.'],
+            thresholds: null,
+        };
+    });
 };
 
 const rsiZoneFromScore = (score) => {
@@ -221,10 +304,12 @@ const Discovery = () => {
         const saved = safeParse(localStorage.getItem(THRESHOLDS_STORAGE_KEY), null);
         return saved || DEFAULT_THRESHOLDS;
     });
+    const [strategyPresets, setStrategyPresets] = useState(FALLBACK_STRATEGY_PRESETS);
+    const [strategyCatalogSource, setStrategyCatalogSource] = useState('fallback');
 
     const [activeStrategy, setActiveStrategy] = useState(() => {
         const saved = safeParse(localStorage.getItem(DISCOVERY_STATE_STORAGE_KEY), null);
-        return saved?.strategyId || 'custom';
+        return normalizeStrategyId(saved?.strategyId || 'custom');
     });
 
     const [scanData, setScanData] = useState(() => {
@@ -242,7 +327,15 @@ const Discovery = () => {
     });
     const [expandedReplacements, setExpandedReplacements] = useState({});
 
-    const activeStrategyConfig = STRATEGY_LOOKUP[activeStrategy] || STRATEGY_LOOKUP.custom;
+    const strategyLookup = useMemo(() => {
+        return strategyPresets.reduce((acc, strategy) => {
+            acc[strategy.id] = strategy;
+            return acc;
+        }, {});
+    }, [strategyPresets]);
+
+    const fallbackStrategyConfig = strategyLookup.custom || strategyPresets[0] || FALLBACK_STRATEGY_PRESETS[0];
+    const activeStrategyConfig = strategyLookup[activeStrategy] || fallbackStrategyConfig;
 
     useEffect(() => {
         document.documentElement.classList.add('discovery-theme');
@@ -250,6 +343,34 @@ const Discovery = () => {
         return () => {
             document.documentElement.classList.remove('discovery-theme');
             document.body.classList.remove('discovery-theme');
+        };
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        const hydrateStrategyCatalog = async () => {
+            try {
+                const payload = await fetchDiscoveryStrategies();
+                const mapped = mapBackendStrategies(payload?.strategies);
+                if (!cancelled && mapped.length > 0) {
+                    setStrategyPresets(mapped);
+                    setStrategyCatalogSource('backend');
+                    setActiveStrategy((previous) => (
+                        mapped.some((strategy) => strategy.id === previous)
+                            ? previous
+                            : mapped[0].id
+                    ));
+                }
+            } catch (fetchError) {
+                console.warn('Discovery strategy catalog unavailable, using fallback presets.', fetchError);
+                if (!cancelled) {
+                    setStrategyCatalogSource('fallback');
+                }
+            }
+        };
+        hydrateStrategyCatalog();
+        return () => {
+            cancelled = true;
         };
     }, []);
 
@@ -274,9 +395,9 @@ const Discovery = () => {
         );
     }, []);
 
-    const runAsyncDefaultScan = useCallback(async () => {
+    const runAsyncDefaultScan = useCallback(async (strategyId, thresholdSet) => {
         setScanProgress({ percent: 0, message: 'Initializing async scan...' });
-        const trigger = await triggerAsyncDiscoveryScan('IN');
+        const trigger = await triggerAsyncDiscoveryScan('IN', normalizeStrategyId(strategyId), thresholdSet);
         const jobId = trigger?.job_id;
         if (!jobId) {
             throw new Error('Async scan did not return a job id');
@@ -308,12 +429,13 @@ const Discovery = () => {
     }, []);
 
     const runScan = useCallback(async (strategyId, thresholdSet) => {
+        const normalizedStrategy = normalizeStrategyId(strategyId);
         const effectiveThresholds = getEffectiveThresholds(strategyId, thresholdSet);
-        const tryAsync = strategyId === 'custom' && isDefaultThresholds(effectiveThresholds);
+        const tryAsync = normalizedStrategy === 'custom' && isDefaultThresholds(effectiveThresholds);
 
         if (tryAsync) {
             try {
-                return await runAsyncDefaultScan();
+                return await runAsyncDefaultScan(normalizedStrategy, effectiveThresholds);
             } catch (asyncError) {
                 console.warn('Async scan failed, falling back to sync scan:', asyncError);
                 setScanProgress({ percent: 0, message: 'Async worker unavailable. Running direct scan...' });
@@ -321,7 +443,7 @@ const Discovery = () => {
         }
 
         try {
-            const syncData = await fetchDiscoveryScan(effectiveThresholds);
+            const syncData = await fetchDiscoveryScan(normalizedStrategy, effectiveThresholds);
             if (!syncData || !Array.isArray(syncData.scan_results)) {
                 throw new Error('Scan response is invalid');
             }
@@ -331,7 +453,7 @@ const Discovery = () => {
             if (canFallbackToAsync) {
                 try {
                     setScanProgress({ percent: 0, message: 'Direct scan failed. Retrying with async worker...' });
-                    return await runAsyncDefaultScan();
+                    return await runAsyncDefaultScan(normalizedStrategy, effectiveThresholds);
                 } catch {
                     // Continue and throw original sync error.
                 }
@@ -341,18 +463,19 @@ const Discovery = () => {
     }, [runAsyncDefaultScan]);
 
     const handleScan = useCallback(async (strategyId = activeStrategy, thresholdSet = thresholds) => {
+        const normalizedStrategy = normalizeStrategyId(strategyId);
         try {
             setLoading(true);
             setError(null);
             setScanProgress({ percent: 0, message: 'Starting market scan...' });
             setExpandedReplacements({});
 
-            const data = await runScan(strategyId, thresholdSet);
+            const data = await runScan(normalizedStrategy, thresholdSet);
             setScanData(data);
-            persistDiscoveryState(strategyId, data);
+            persistDiscoveryState(normalizedStrategy, data);
         } catch (scanError) {
             console.error('Discovery scan error:', scanError);
-            setError(scanError?.message || 'Failed to scan market. Please try again.');
+            setError(resolveDiscoveryErrorMessage(scanError));
         } finally {
             setLoading(false);
             setScanProgress({ percent: 0, message: '' });
@@ -370,12 +493,13 @@ const Discovery = () => {
     };
 
     const handleSelectStrategy = (strategyId) => {
-        setActiveStrategy(strategyId);
+        const normalizedStrategy = normalizeStrategyId(strategyId);
+        setActiveStrategy(normalizedStrategy);
         setError(null);
         setScanProgress({ percent: 0, message: '' });
         setScanData(null);
         setExpandedReplacements({});
-        persistDiscoveryState(strategyId, null);
+        persistDiscoveryState(normalizedStrategy, null);
     };
 
     const openThresholdsModal = () => {
@@ -405,7 +529,9 @@ const Discovery = () => {
 
     const replacementRanking = useMemo(() => buildReplacementRanking(scanData, ideas), [scanData, ideas]);
 
-    const activeStrategyLabel = activeStrategyConfig?.label || 'Custom Trade';
+    const activeStrategyLabel = activeStrategyConfig?.label || 'Custom Thresholds';
+    const scanStrategyLabel = scanData?.strategy_metadata?.strategy_label || activeStrategyLabel;
+    const scanSeconds = Number(scanData?.scan_metadata?.scan_time_seconds);
 
     const toggleWatchlist = (idea) => {
         if (watchlistTickers.has(idea.ticker)) {
@@ -445,7 +571,7 @@ const Discovery = () => {
 
             <section className="discovery-tabs-card">
                 <div className="strategy-tabs" role="tablist" aria-label="Strategy tabs">
-                    {STRATEGY_PRESETS.map((strategy) => (
+                    {strategyPresets.map((strategy) => (
                         <button
                             key={strategy.id}
                             type="button"
@@ -457,6 +583,9 @@ const Discovery = () => {
                             {strategy.label}
                         </button>
                     ))}
+                </div>
+                <div className={`strategy-source-chip ${strategyCatalogSource === 'backend' ? 'live' : 'fallback'}`}>
+                    {strategyCatalogSource === 'backend' ? 'Live backend strategy catalog' : 'Fallback strategy catalog'}
                 </div>
             </section>
 
@@ -510,10 +639,17 @@ const Discovery = () => {
                     <span>Screening Logic</span>
                 </div>
                 <ul className="strategy-details-list">
-                    {activeStrategyConfig.details.map((detail) => (
+                    {(activeStrategyConfig?.details || []).map((detail) => (
                         <li key={detail}>{detail}</li>
                     ))}
                 </ul>
+                {scanData ? (
+                    <div className="scan-meta-strip">
+                        <span>Engine: {scanStrategyLabel}</span>
+                        {Number.isFinite(scanSeconds) ? <span>Scan: {scanSeconds.toFixed(1)}s</span> : null}
+                        <span>Strategy ID: {(scanData?.strategy || activeStrategy || 'custom').toString()}</span>
+                    </div>
+                ) : null}
             </section>
 
             {loading && (

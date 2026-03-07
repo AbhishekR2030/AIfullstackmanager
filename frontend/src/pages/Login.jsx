@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import api, { loginWithGoogle } from '../services/api';
 import { persistAuth, restoreAuth } from '../services/authStorage';
 import { hasHdfcCallbackParams, persistPendingHdfcCallback } from '../services/hdfcCallbackStorage';
+import { hasZerodhaCallbackParams, persistPendingZerodhaCallback } from '../services/zerodhaCallbackStorage';
 import { GoogleAuth } from '@codetrix-studio/capacitor-google-auth';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import './Login.css';
@@ -88,11 +89,19 @@ const Login = () => {
             try {
                 const parsed = new URL(url);
                 const params = new URLSearchParams(parsed.search);
-                if (!hasHdfcCallbackParams(params)) {
+                const hasHdfcCallback = hasHdfcCallbackParams(params);
+                const hasZerodhaCallback = hasZerodhaCallbackParams(params);
+
+                if (!hasHdfcCallback && !hasZerodhaCallback) {
                     return;
                 }
 
-                persistPendingHdfcCallback(params);
+                if (hasHdfcCallback) {
+                    persistPendingHdfcCallback(params);
+                }
+                if (hasZerodhaCallback) {
+                    persistPendingZerodhaCallback(params);
+                }
 
                 const { token } = await restoreAuth();
                 if (token) {

@@ -2,13 +2,23 @@
 import yfinance as yf
 import pandas as pd
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+import math
 try:
     import pandas_ta as ta
 except ImportError:
     ta = None
 import numpy as np
 from app.engines.market_loader import market_loader
+from app.engines.discovery_platform import (
+    DataPlatformService,
+    ExecutionSimulationService,
+    MonitoringService,
+    PortfolioAccountingService,
+    RiskGuardService,
+)
+from app.engines.strategy_base import ScanRuntimeContext
+from app.engines.strategies import StrategyRegistry
 from concurrent.futures import ThreadPoolExecutor
 import requests
 import json
@@ -103,14 +113,34 @@ STRATEGY_CONFIGS: Dict[str, ScanConfig] = {
     "jane_street_stat": JANE_STREET_STAT,
     "millennium_quality": MILLENNIUM_QUALITY,
     "de_shaw_multifactor": DE_SHAW_MULTIFACTOR,
+    # Backward-compatible aliases for older frontend IDs.
+    "alphaseeker_core": ALPHASEEKER_CORE,
+    "custom_trade": ALPHASEEKER_CORE,
+    "janestreet_quant": JANE_STREET_STAT,
+    "jane_street": JANE_STREET_STAT,
+    "deshaw_quality": DE_SHAW_MULTIFACTOR,
+    "de_shaw_quality": DE_SHAW_MULTIFACTOR,
     "custom": ALPHASEEKER_CORE,
 }
 
 class MarketScanner:
     def __init__(self):
         self.loader = market_loader
+        self.data_platform = DataPlatformService(self.loader)
+        self.risk_guard = RiskGuardService()
+        self.execution_simulator = ExecutionSimulationService()
+        self.portfolio_accounting = PortfolioAccountingService()
+        self.monitoring = MonitoringService()
+        self.strategy_registry = StrategyRegistry()
         self.cache = None
         self.last_scan_time = 0
+        self.cache_by_key: Dict[str, Dict[str, Any]] = {}
+        self.legacy_cache_context: Dict[str, Any] = {
+            "region": "IN",
+            "strategy": "core",
+            "thresholds_empty": True,
+        }
+        self.last_scan_metadata: Dict[str, Any] = {}
         self.CACHE_DURATION = 900 # 15 Minutes
 
     def _estimate_wacc(self, info, risk_free_rate=0.07):
@@ -141,8 +171,41 @@ class MarketScanner:
         except:
             return 0.10
 
+    def _cache_key(self, region: str, strategy: str, thresholds: Optional[dict]) -> str:
+        threshold_payload = thresholds or {}
+        return json.dumps(
+            {
+                "region": (region or "IN").strip().upper(),
+                "strategy": self.strategy_registry.normalize(strategy),
+                "thresholds": threshold_payload,
+            },
+            sort_keys=True,
+        )
+
+    def _legacy_cache_matches(self, region: str, strategy: str, thresholds: Optional[dict]) -> bool:
+        context = self.legacy_cache_context or {}
+        return (
+            bool(context.get("thresholds_empty", True))
+            and bool(not (thresholds or {}))
+            and str(context.get("region", "IN")).upper() == str(region or "IN").upper()
+            and str(context.get("strategy", "core")).lower() == self.strategy_registry.normalize(strategy)
+        )
+
+    def get_supported_strategies(self) -> List[Dict[str, Any]]:
+        return self.strategy_registry.to_payload()
+
+    def get_strategy_payload(self, strategy: str) -> Dict[str, Any]:
+        pipeline = self.strategy_registry.get(strategy)
+        return {
+            "strategy_id": pipeline.strategy_id,
+            "strategy_label": pipeline.strategy_label,
+            "strategy_tier": pipeline.strategy_tier,
+            "strategy_summary": pipeline.strategy_summary,
+            "strategy_logic": list(pipeline.strategy_logic),
+        }
+
     def _resolve_scan_config(self, strategy: str = "core", thresholds: Optional[dict] = None) -> ScanConfig:
-        normalized_strategy = (strategy or "core").strip().lower()
+        normalized_strategy = self.strategy_registry.normalize(strategy)
         base = STRATEGY_CONFIGS.get(normalized_strategy, ALPHASEEKER_CORE)
         thresholds = thresholds or {}
         technical = thresholds.get("technical", {}) or {}
@@ -198,6 +261,21 @@ class MarketScanner:
         clipped = max(low, min(high, float(value)))
         return ((clipped - low) / (high - low)) * 100.0
 
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        """
+        Ensures scanner outputs are JSON-serializable numeric values.
+        Replaces NaN/Inf from upstream data providers with defaults.
+        """
+        try:
+            if value is None:
+                return float(default)
+            parsed = float(value)
+            if not math.isfinite(parsed):
+                return float(default)
+            return parsed
+        except Exception:
+            return float(default)
+
     def _economic_moat_check(self, info: dict, roe: float) -> bool:
         # Support both decimal (0.18) and percentage-style (18) ROE inputs.
         roe_decimal = float(roe)
@@ -208,11 +286,11 @@ class MarketScanner:
         return (roe_decimal - wacc) >= 0.05
 
     def _composite_upside_score(self, metrics: dict, config: ScanConfig) -> float:
-        rsi = float(metrics.get("rsi", 50.0))
-        macd_hist = float(metrics.get("macd_hist", 0.0))
-        roe = float(metrics.get("roe", 0.0))
-        rev_growth = float(metrics.get("rev_growth", 0.0))
-        pe = float(metrics.get("pe_ratio", 0.0))
+        rsi = self._safe_float(metrics.get("rsi", 50.0), 50.0)
+        macd_hist = self._safe_float(metrics.get("macd_hist", 0.0), 0.0)
+        roe = self._safe_float(metrics.get("roe", 0.0), 0.0)
+        rev_growth = self._safe_float(metrics.get("rev_growth", 0.0), 0.0)
+        pe = self._safe_float(metrics.get("pe_ratio", 0.0), 0.0)
         rev_growth_pct = rev_growth * 100.0 if rev_growth <= 1.0 else rev_growth
 
         momentum_score = 0.5 * self._normalise(rsi, 30, 70) + 0.5 * self._normalise(macd_hist, 0, 20)
@@ -352,9 +430,9 @@ class MarketScanner:
         try:
             cfg = config or ALPHASEEKER_CORE
             if ta:
-                rsi = ta.rsi(df['Close'], length=14).iloc[-1]
+                rsi = self._safe_float(ta.rsi(df['Close'], length=14).iloc[-1], 50.0)
                 macd = ta.macd(df['Close'])
-                macd_hist = macd['MACDh_12_26_9'].iloc[-1]
+                macd_hist = self._safe_float(macd['MACDh_12_26_9'].iloc[-1], 0.0)
             else:
                 rsi = 50.0
                 macd_hist = 0.0
@@ -373,14 +451,14 @@ class MarketScanner:
                 roe_score = np.clip(roe * 400, 0, 100)
                 fund_score = (rev_score * 0.5) + (roe_score * 0.5)
 
-            current_price = df['Close'].iloc[-1]
+            current_price = self._safe_float(df['Close'].iloc[-1], 0.0)
             target_price = info.get('targetMeanPrice', None)
             
             upside_pct = 0
             if target_price and target_price > 0:
                 upside_pct = (target_price - current_price) / current_price
             else:
-                peg = info.get('pegRatio', 0)
+                peg = self._safe_float(info.get('pegRatio', 0), 0.0)
                 if peg and 0 < peg < 1.0: upside_pct = 0.20
                 elif peg and peg < 1.5: upside_pct = 0.10
                 else: upside_pct = 0.05
@@ -500,294 +578,327 @@ class MarketScanner:
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ):
         """
-        Main scanning method with user-configurable thresholds.
-        
-        Args:
-            region: "IN" for India, "US" for US markets
-            thresholds: Dict with 'technical' and 'fundamental' sub-dicts
+        Main scanner entrypoint using shared platform layers + strategy pipelines.
         """
-        # Default thresholds if not provided
         thresholds = thresholds or {}
-        config = self._resolve_scan_config(strategy=strategy, thresholds=thresholds)
+        normalized_strategy = self.strategy_registry.normalize(strategy)
+        config = self._resolve_scan_config(strategy=normalized_strategy, thresholds=thresholds)
+        pipeline = self.strategy_registry.get(normalized_strategy)
 
-        # Technical thresholds
-        rsi_min = config.rsi_min
-        rsi_max = config.rsi_max
-        vol_min = float((thresholds.get("technical", {}) or {}).get('volatility_min', 3))
-        vol_max = float((thresholds.get("technical", {}) or {}).get('volatility_max', 8))
-        vol_shock_min = config.volume_multiplier
-        
-        # Fundamental thresholds (in decimal, e.g., 0.10 for 10%)
-        rev_growth_min = config.rev_growth_min / 100
-        rev_growth_max = config.rev_growth_max / 100
-        profit_growth_min = config.profit_growth_min / 100
-        profit_growth_max = config.profit_growth_max / 100
-        roe_min = config.roe_min / 100
+        vol_min = float((thresholds.get("technical", {}) or {}).get("volatility_min", 3))
+        vol_max = float((thresholds.get("technical", {}) or {}).get("volatility_max", 8))
+
+        runtime_context = ScanRuntimeContext(
+            region=(region or "IN").strip().upper(),
+            strategy_id=pipeline.strategy_id,
+            thresholds=thresholds,
+            user_plan=(user_plan or "pro").strip().lower(),
+            volatility_min=vol_min,
+            volatility_max=vol_max,
+        )
+
+        cache_key = self._cache_key(runtime_context.region, normalized_strategy, thresholds if thresholds else None)
+        now = time.time()
+
+        if not thresholds:
+            cache_entry = self.cache_by_key.get(cache_key)
+            if cache_entry and (now - float(cache_entry.get("timestamp", 0)) < self.CACHE_DURATION):
+                cached_results = cache_entry.get("results", [])
+                if runtime_context.user_plan == "free":
+                    return list(cached_results)[:10]
+                return list(cached_results)
+
+            # Backward compatibility for legacy single-cache usage and tests.
+            if (
+                self.cache
+                and (now - self.last_scan_time < self.CACHE_DURATION)
+                and self._legacy_cache_matches(runtime_context.region, normalized_strategy, thresholds)
+            ):
+                print("Returning Cached Scan Results (legacy cache path)")
+                if runtime_context.user_plan == "free":
+                    return list(self.cache)[:10]
+                return list(self.cache)
+
+        print(
+            f"Starting Scan ({runtime_context.region}) with strategy={pipeline.strategy_id} "
+            f"RSI={config.rsi_min}-{config.rsi_max}, Vol={vol_min}-{vol_max}%..."
+        )
+
+        telemetry = self.monitoring.start_scan(strategy_id=pipeline.strategy_id, region=runtime_context.region)
+        telemetry.increment("strategy_runs", 1)
+
+        rev_growth_min = config.rev_growth_min / 100.0
+        rev_growth_max = config.rev_growth_max / 100.0
+        profit_growth_min = config.profit_growth_min / 100.0
+        profit_growth_max = config.profit_growth_max / 100.0
+        roe_min = config.roe_min / 100.0
         roe_max = 1.0
-        roce_min = config.roce_min / 100
+        roce_min = config.roce_min / 100.0
         roce_max = 1.0
         de_min = 0.0
         de_max = config.max_debt_equity
-        
-        # 1. Cache Check (skip cache if custom thresholds provided)
-        if not thresholds and self.cache and (time.time() - self.last_scan_time < self.CACHE_DURATION):
-            print("Returning Cached Scan Results (Speed Optimized)")
-            if (user_plan or "").strip().lower() == "free":
-                return self.cache[:10]
-            return self.cache
 
-        print(f"Starting Scan ({region}) with thresholds: RSI={rsi_min}-{rsi_max}, Vol={vol_min}-{vol_max}%...")
-        
         try:
             self._emit_progress(progress_callback, 5, "Loading market universe")
-            tickers = self.loader.get_india_tickers() if region == "IN" else self.loader.get_us_tickers()
-            
-            # 2. Batch Fetch History (Technicals via Yahoo - Reliable)
+            tickers = self.data_platform.load_universe(runtime_context.region)
+            telemetry.increment("total_screened", len(tickers))
+
             self._emit_progress(progress_callback, 15, "Fetching OHLCV data")
-            data = self.loader.fetch_data(tickers, period="3mo")
-            if data is None or data.empty: 
-                if self.cache: return self.cache
+            data = self.data_platform.fetch_ohlcv(tickers, period="3mo")
+            if data is None or getattr(data, "empty", True):
+                if self.cache and self._legacy_cache_matches(runtime_context.region, normalized_strategy, thresholds):
+                    return list(self.cache)[:10] if runtime_context.user_plan == "free" else list(self.cache)
                 return []
 
-            # 3. Tech Screen 
-            tech_pass_candidates = []
-            usd_inr = 85.0
-            
-            print(f"Tech screening {len(tickers)} assets...")
             self._emit_progress(progress_callback, 30, f"Applying technical filters on {len(tickers)} stocks")
-            
+            tech_pass_candidates: List[Dict[str, Any]] = []
+
             for ticker in tickers:
-                 try:
-                    df = data[ticker].dropna() if len(tickers) > 1 else data
-                    if df.empty or len(df) < 55: continue
-                    
-                    # Technical Checks
-                    current_price = df['Close'].iloc[-1]
-                    avg_vol_20 = df['Volume'].rolling(20).mean().iloc[-1]
-                    
-                    # Liquidity
-                    daily_turnover = current_price * avg_vol_20
-                    turnover_inr = daily_turnover if region == "IN" else daily_turnover * usd_inr
-                    if current_price < config.min_price or current_price > config.max_price:
+                try:
+                    df = data[ticker].dropna() if len(tickers) > 1 else data.dropna()
+                    if df.empty or len(df) < 55:
+                        telemetry.increment("rejected_short_history", 1)
                         continue
-                    if turnover_inr < (config.min_turnover_cr * 1e7):
+
+                    features = pipeline.compute_technical_features(df, runtime_context)
+                    if not features:
+                        telemetry.increment("rejected_feature_compute", 1)
                         continue
-                    
-                    # Volatility (use thresholds)
-                    monthly_vol = df['Close'].pct_change().tail(30).std() * np.sqrt(21) * 100
-                    if monthly_vol > vol_max or monthly_vol < vol_min: continue
-    
-                    # Momentum
-                    sma_50 = df['Close'].rolling(50).mean().iloc[-1]
-                    sma_20 = df['Close'].rolling(20).mean().iloc[-1]
-                    if current_price <= sma_50 or current_price <= sma_20: continue
-                    
-                    # RSI (use thresholds)
+
+                    rsi = 50.0
+                    macd_hist = 1.0
+                    rsi_slope_5 = 0.0
                     if ta:
-                        rsi = ta.rsi(df['Close'], length=14).iloc[-1]
-                        if not (rsi_min <= rsi <= rsi_max): continue
-                    else:
-                        rsi = 50.0
-                    
-                    # Volume Shock (use threshold)
-                    current_vol = df['Volume'].iloc[-1]
-                    if current_vol <= (vol_shock_min * avg_vol_20): continue
-                    
-                    if ta:
-                        macd = ta.macd(df['Close'])
-                        hist = macd['MACDh_12_26_9'].iloc[-1]
-                        if hist <= 0: continue
-                    else:
-                        hist = 1.0 # Simulate pass
-                    
-                    tech_pass_candidates.append({
-                        "ticker": ticker,
-                        "df": df, 
-                        "price": float(current_price),
-                        "tech_score": float(rsi),
-                        "rsi": float(rsi),
-                        "vol_shock": float(current_vol/avg_vol_20)
-                    })
-                 except: continue
-    
-            # 4. Select top technical candidates for fundamental analysis.
-            # Keep this above free-cap (10) so Pro can see a broader ranked list.
-            tech_pass_candidates.sort(key=lambda x: x.get('vol_shock', 0), reverse=True)
-            top_candidates = tech_pass_candidates[:30]
-            
-            if not top_candidates: 
-                 if self.cache: return self.cache
-                 return []
-            
-            # 5. Fetch Fundamentals via Yahoo Finance (FREE - no API key needed)
+                        rsi_series = ta.rsi(df["Close"], length=14)
+                        if rsi_series is not None and not rsi_series.empty and pd.notna(rsi_series.iloc[-1]):
+                            rsi = float(rsi_series.iloc[-1])
+                        if rsi_series is not None and len(rsi_series.dropna()) >= 6:
+                            rsi_slope_5 = float(rsi_series.dropna().iloc[-1] - rsi_series.dropna().iloc[-6])
+
+                        macd_df = ta.macd(df["Close"])
+                        if macd_df is not None and "MACDh_12_26_9" in macd_df and pd.notna(macd_df["MACDh_12_26_9"].iloc[-1]):
+                            macd_hist = float(macd_df["MACDh_12_26_9"].iloc[-1])
+
+                    features.update(
+                        {
+                            "rsi": rsi,
+                            "macd_hist": macd_hist,
+                            "rsi_slope_5": rsi_slope_5,
+                        }
+                    )
+
+                    liquidity_ok, liquidity_reason, liquidity_metrics = self.risk_guard.evaluate_liquidity(
+                        features, config, runtime_context.region
+                    )
+                    if not liquidity_ok:
+                        telemetry.increment(f"rejected_{liquidity_reason}", 1)
+                        continue
+
+                    features.update(liquidity_metrics)
+                    if not pipeline.technical_filter(features, runtime_context, config):
+                        telemetry.increment("rejected_strategy_technical", 1)
+                        continue
+
+                    tech_pass_candidates.append(
+                        {
+                            "ticker": ticker,
+                            "df": df,
+                            "price": round(float(features.get("current_price", 0.0)), 2),
+                            "rsi": round(rsi, 2),
+                            "vol_shock": round(float(features.get("vol_shock", 0.0)), 2),
+                            "features": features,
+                            "region": runtime_context.region,
+                        }
+                    )
+                except Exception:
+                    telemetry.increment("technical_processing_errors", 1)
+                    continue
+
+            telemetry.increment("technical_passed", len(tech_pass_candidates))
+            top_candidates = self.execution_simulator.select_fundamental_candidates(tech_pass_candidates, limit=30)
+
+            if not top_candidates:
+                if self.cache and self._legacy_cache_matches(runtime_context.region, normalized_strategy, thresholds):
+                    return list(self.cache)[:10] if runtime_context.user_plan == "free" else list(self.cache)
+                return []
+
             self._emit_progress(progress_callback, 60, "Evaluating fundamentals")
-            print("=" * 50, flush=True)
-            print("[DEPLOY v2.0] Fetching fundamentals via YAHOO FINANCE (not FMP!)", flush=True)
-            print("=" * 50, flush=True)
-            final_list = []
-            
-            # Helper to fetch and process single candidate
-            def fetch_and_process(cand):
-                ticker = cand.get('ticker', 'UNKNOWN')
-                print(f"Analyzing Fundamentals: {ticker}")
-                
-                # Fetch Data from Yahoo Finance (primary)
-                p_data = self._fetch_yahoo_fundamentals(ticker, region)
+            final_list: List[Dict[str, Any]] = []
+
+            def fetch_and_process(candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                ticker = candidate.get("ticker", "UNKNOWN")
+                print(f"Analyzing Fundamentals: {ticker}", flush=True)
+
+                p_data = self._fetch_yahoo_fundamentals(ticker, runtime_context.region)
                 if not p_data or p_data.get("source") != "YahooFinance":
-                    # Fallback to Perplexity if Yahoo fails
-                    p_data = self._fetch_perplexity_fundamentals_legacy(ticker, region)
-                
-                # Helper: Safe Float
-                def safe_float(val, default=0.0):
-                    try: 
-                        if val is None: return default
-                        return float(val)
-                    except: return default
-    
-                # Graceful Fallback Logic
+                    p_data = self._fetch_perplexity_fundamentals_legacy(ticker, runtime_context.region)
+
+                def safe_float(value: Any, default: float = 0.0) -> float:
+                    return self._safe_float(value, default)
+
                 default_growth = 0.20 if not p_data else 0.0
                 default_roe = 0.20 if not p_data else 0.0
-                
-                # Construct Info Object for Scoring
-                # FIXED: use correct field names from yahoo_fundamentals_engine
-                rev_growth = safe_float(p_data.get('revenue_growth_yoy'), default_growth)
-                roe = safe_float(p_data.get('return_on_equity'), default_roe)
-                roce = safe_float(p_data.get('return_on_capital_employed'), default_roe)  # FIXED field name
-                profit_growth = safe_float(p_data.get('profit_growth_yoy'), default_growth)  # FIXED field name
-                dte = safe_float(p_data.get('debt_to_equity'), 50)  # Already in percentage for Indian stocks
-                
-                info_proxy = {
-                    'quoteType': 'EQUITY', 
-                    'revenueGrowth': rev_growth,
-                    'profitGrowth': profit_growth,
-                    'returnOnEquity': roe,
-                    'roce': roce,
-                    'debtToEquity': dte,
-                    'sector': p_data.get('sector', 'Unknown'),
-                    'beta': safe_float(p_data.get('beta'), 1.0),
-                    'targetMeanPrice': cand.get('price', 0) * 1.2 
-                }
-                
-                # Log actual vs threshold for debugging
-                print(f"[FUND] {ticker}: RevGrowth={rev_growth:.2%} (threshold: {rev_growth_min:.0%}-{rev_growth_max:.0%})", flush=True)
-                print(f"[FUND] {ticker}: ROE={roe:.2%} (threshold: {roe_min:.0%}-{roe_max:.0%})", flush=True)
-                print(f"[FUND] {ticker}: ROCE={roce:.2%} (threshold: {roce_min:.0%}-{roce_max:.0%})", flush=True)
-                print(f"[FUND] {ticker}: ProfitGrowth={profit_growth:.2%} (threshold: {profit_growth_min:.0%}-{profit_growth_max:.0%})", flush=True)
-                print(f"[FUND] {ticker}: D/E={dte:.1f} (threshold: {de_min}-{de_max})", flush=True)
-                
-                # Fundamental Check Logic (using user thresholds)
-                passed = True
-                failed_checks = []
-                
-                if not (rev_growth_min <= info_proxy['revenueGrowth'] <= rev_growth_max):
-                    passed = False; failed_checks.append(f"RevGrowth: {info_proxy['revenueGrowth']:.1%}")
-                if not (roe_min <= info_proxy['returnOnEquity'] <= roe_max):
-                    passed = False; failed_checks.append(f"ROE: {info_proxy['returnOnEquity']:.1%}")
-                if not (roce_min <= info_proxy.get('roce', 0) <= roce_max):
-                    passed = False; failed_checks.append(f"ROCE: {info_proxy.get('roce', 0):.1%}")
-                if not (profit_growth_min <= info_proxy.get('profitGrowth', 0) <= profit_growth_max):
-                    passed = False; failed_checks.append(f"ProfitGrowth: {info_proxy.get('profitGrowth', 0):.1%}")
-                if not (de_min <= info_proxy['debtToEquity'] <= de_max): 
-                    passed = False; failed_checks.append(f"D/E: {info_proxy['debtToEquity']:.1f}")
-                
-                failed_list = ", ".join(failed_checks)
-                if passed:
-                    print(f"[FUND] PASS {ticker}: All fundamentals in range!", flush=True)
-                else:
-                    print(f"[FUND] PARTIAL {ticker}: Failed checks: {failed_list}", flush=True)
-    
-                if config.moat_check and not self._economic_moat_check(info_proxy, info_proxy.get("returnOnEquity", 0) or 0):
-                    passed = False
-                    failed_checks.append("EconomicMoat: ROE-WACC < 5%")
-                    failed_list = ", ".join(failed_checks)
 
-                score_data = self._calculate_upside_score(cand.get('df'), info_proxy, region, config=config)
-                
-                # Build comprehensive thesis with ALL metrics
-                rev_val = info_proxy['revenueGrowth'] * 100
-                roe_val = info_proxy['returnOnEquity'] * 100
-                roce_val = info_proxy.get('roce', 0) * 100
-                profit_val = info_proxy.get('profitGrowth', 0) * 100
-                de_val = info_proxy['debtToEquity']
-                
-                # Format metrics summary (show all values vs thresholds)
-                metrics_summary = (
-                    f"📊 RevGrowth: {rev_val:.1f}% (target: {rev_growth_min*100:.0f}%-{rev_growth_max*100:.0f}%) | "
-                    f"ROE: {roe_val:.1f}% (target: {roe_min*100:.0f}%-{roe_max*100:.0f}%) | "
-                    f"ROCE: {roce_val:.1f}% (target: {roce_min*100:.0f}%-{roce_max*100:.0f}%) | "
-                    f"ProfitGrowth: {profit_val:.1f}% (target: {profit_growth_min*100:.0f}%-{profit_growth_max*100:.0f}%) | "
-                    f"D/E: {de_val:.1f} (target: {de_min}-{de_max})"
+                rev_growth = safe_float(p_data.get("revenue_growth_yoy"), default_growth)
+                roe = safe_float(p_data.get("return_on_equity"), default_roe)
+                roce = safe_float(p_data.get("return_on_capital_employed"), default_roe)
+                profit_growth = safe_float(p_data.get("profit_growth_yoy"), default_growth)
+                debt_to_equity = safe_float(p_data.get("debt_to_equity"), 50.0)
+                trailing_pe = safe_float(
+                    p_data.get("trailing_pe", p_data.get("trailingPE", p_data.get("pe_ratio", 0.0))),
+                    0.0,
                 )
-                
-                # Technical reasoning (why this stock was picked)
-                tech_reason_parts = []
-                tech_reason_parts.append(f"📈 Momentum: {score_data.get('momentum_score', 50):.0f}")
-                tech_reason_parts.append(f"RSI: {cand.get('rsi', 50):.1f}")
-                tech_reason_parts.append(f"Volume Shock: {cand.get('vol_shock', 1):.1f}x avg")
-                tech_reason_parts.append("Price > SMA50 & SMA20")
-                tech_reason_parts.append("MACD bullish")
-                
-                tech_reason = " | ".join(tech_reason_parts)
-                
-                # Final thesis
-                if passed:
-                    fundamental_thesis = f"✅ All fundamentals pass thresholds. {metrics_summary}. Technical Pick: {tech_reason}"
+
+                info_proxy = {
+                    "quoteType": "EQUITY",
+                    "revenueGrowth": rev_growth,
+                    "profitGrowth": profit_growth,
+                    "returnOnEquity": roe,
+                    "roce": roce,
+                    "debtToEquity": debt_to_equity,
+                    "sector": p_data.get("sector", "Unknown"),
+                    "beta": safe_float(p_data.get("beta"), 1.0),
+                    "targetMeanPrice": candidate.get("price", 0) * 1.2,
+                    "trailingPE": trailing_pe,
+                    "pegRatio": safe_float(p_data.get("peg_ratio", p_data.get("pegRatio", 0.0)), 0.0),
+                }
+
+                fundamentals_passed, failed_checks = pipeline.evaluate_fundamentals(
+                    info_proxy,
+                    runtime_context,
+                    config,
+                )
+
+                moat_failed = False
+                if config.moat_check and not self._economic_moat_check(info_proxy, info_proxy.get("returnOnEquity", 0) or 0):
+                    fundamentals_passed = False
+                    moat_failed = True
+                    failed_checks.append("EconomicMoat: ROE-WACC < 5%")
+
+                score_data = self._calculate_upside_score(candidate.get("df"), info_proxy, runtime_context.region, config=config)
+                adjusted_score = pipeline.adjust_score(
+                    score_data.get("total_score", 50.0),
+                    candidate.get("features", {}),
+                    info_proxy,
+                    fundamentals_passed,
+                    runtime_context,
+                    config,
+                )
+
+                execution_estimate = self.execution_simulator.estimate_execution(
+                    candidate.get("features", {}),
+                    runtime_context.region,
+                )
+                risk_flags = self.risk_guard.build_risk_flags(
+                    candidate.get("features", {}),
+                    info_proxy,
+                    fundamentals_passed,
+                    failed_checks,
+                    execution_estimate,
+                    moat_failed=moat_failed,
+                )
+
+                rev_val = self._safe_float(info_proxy["revenueGrowth"], 0.0) * 100
+                roe_val = self._safe_float(info_proxy["returnOnEquity"], 0.0) * 100
+                roce_val = self._safe_float(info_proxy.get("roce", 0), 0.0) * 100
+                profit_val = self._safe_float(info_proxy.get("profitGrowth", 0), 0.0) * 100
+                debt_val = self._safe_float(info_proxy["debtToEquity"], 0.0)
+
+                metrics_summary = (
+                    f"RevGrowth: {rev_val:.1f}% ({rev_growth_min*100:.0f}%–{rev_growth_max*100:.0f}%) | "
+                    f"ROE: {roe_val:.1f}% ({roe_min*100:.0f}%–{roe_max*100:.0f}%) | "
+                    f"ROCE: {roce_val:.1f}% ({roce_min*100:.0f}%–{roce_max*100:.0f}%) | "
+                    f"ProfitGrowth: {profit_val:.1f}% ({profit_growth_min*100:.0f}%–{profit_growth_max*100:.0f}%) | "
+                    f"D/E: {debt_val:.1f} ({de_min:.0f}–{de_max:.0f})"
+                )
+
+                technical_reason = pipeline.build_technical_reason(candidate.get("features", {}), runtime_context)
+                failed_label = ", ".join(failed_checks)
+                if fundamentals_passed:
+                    fundamental_thesis = f"All fundamentals pass thresholds. {metrics_summary}. {technical_reason}"
                 else:
-                    fundamental_thesis = f"⚠️ Technical momentum play (some fundamentals outside thresholds: {failed_list}). {metrics_summary}. Why picked: {tech_reason}"
-                
-                # ALWAYS return stock with fundamentals (whether passed or not)
+                    fundamental_thesis = (
+                        "Momentum setup with selective fundamental misses "
+                        f"({failed_label if failed_label else 'none noted'}). "
+                        f"{metrics_summary}. {technical_reason}"
+                    )
+
                 return {
                     "ticker": ticker,
-                    "price": round(cand.get('price', 0), 2),
-                    "score": score_data.get('total_score', 50) if passed else 60,  # Lower score if failed
-                    "upside_potential": score_data.get('upside_pct', 0),
-                    "momentum_score": score_data.get('momentum_score', 50),
-                    "rsi": round(cand.get('rsi', 50), 2),
-                    "vol_shock": round(cand.get('vol_shock', 1), 2),
-                    "sector": info_proxy.get('sector', 'Unknown'),
-                    "beta": info_proxy.get('beta', 1.0),
+                    "price": round(self._safe_float(candidate.get("price", 0.0), 0.0), 2),
+                    "score": round(self._safe_float(adjusted_score, 0.0), 2),
+                    "upside_potential": self._safe_float(score_data.get("upside_pct", 0), 0.0),
+                    "momentum_score": self._safe_float(score_data.get("momentum_score", 50), 50.0),
+                    "rsi": round(self._safe_float(candidate.get("rsi", 50.0), 50.0), 2),
+                    "vol_shock": round(self._safe_float(candidate.get("vol_shock", 1.0), 1.0), 2),
+                    "sector": info_proxy.get("sector", "Unknown"),
+                    "beta": self._safe_float(info_proxy.get("beta", 1.0), 1.0),
                     "fundamental_thesis": fundamental_thesis,
-                    "fundamentals_passed": passed,
+                    "fundamentals_passed": fundamentals_passed,
                     "fundamentals": {
-                        "revenue_growth": round(info_proxy['revenueGrowth'] * 100, 1),
-                        "roe": round(info_proxy['returnOnEquity'] * 100, 1),
-                        "roce": round(info_proxy.get('roce', 0) * 100, 1),
-                        "profit_growth": round(info_proxy.get('profitGrowth', 0) * 100, 1),
-                        "debt_equity": round(info_proxy['debtToEquity'], 1)
-                    }
+                        "revenue_growth": round(self._safe_float(info_proxy["revenueGrowth"], 0.0) * 100, 1),
+                        "roe": round(self._safe_float(info_proxy["returnOnEquity"], 0.0) * 100, 1),
+                        "roce": round(self._safe_float(info_proxy.get("roce", 0), 0.0) * 100, 1),
+                        "profit_growth": round(self._safe_float(info_proxy.get("profitGrowth", 0), 0.0) * 100, 1),
+                        "debt_equity": round(self._safe_float(info_proxy["debtToEquity"], 0.0), 1),
+                    },
+                    "strategy_id": pipeline.strategy_id,
+                    "strategy_label": pipeline.strategy_label,
+                    "strategy_summary": pipeline.strategy_summary,
+                    "strategy_tier": pipeline.strategy_tier,
+                    "alpha_rationale": {
+                        "technical": technical_reason,
+                        "fundamental": "All fundamental checks passed"
+                        if fundamentals_passed
+                        else f"Failed checks: {failed_label if failed_label else 'Not specified'}",
+                    },
+                    "risk_flags": risk_flags,
+                    "execution": execution_estimate,
                 }
-    
-            # Run Parallel
+
             with ThreadPoolExecutor(max_workers=5) as executor:
                 results = executor.map(fetch_and_process, top_candidates)
-            
-            for res in results:
-                if res: final_list.append(res)
-                    
-            # Note: No fallback needed now since we always return stocks with data
-            if not final_list and top_candidates:
-                 print("No candidates processed. Check for errors.", flush=True)
-    
-            # 6. Final Sort & Cache
-            final_list.sort(key=lambda x: x.get('score', 0), reverse=True)
-            if (user_plan or "").strip().lower() == "free":
+
+            for result in results:
+                if result:
+                    final_list.append(result)
+
+            final_list.sort(key=lambda stock: stock.get("score", 0), reverse=True)
+            telemetry.increment("total_passed", len(final_list))
+            self.portfolio_accounting.attach_portfolio_context(final_list)
+
+            if runtime_context.user_plan == "free":
                 final_list = final_list[:10]
-            
-            # Update Cache (only if default thresholds)
+
             if not thresholds:
-                self.cache = final_list
-                self.last_scan_time = time.time()
+                cache_timestamp = time.time()
+                cache_entry = {
+                    "results": list(final_list),
+                    "timestamp": cache_timestamp,
+                    "strategy_id": pipeline.strategy_id,
+                }
+                self.cache_by_key[cache_key] = cache_entry
+                self.cache = list(final_list)
+                self.legacy_cache_context = {
+                    "region": runtime_context.region,
+                    "strategy": pipeline.strategy_id,
+                    "thresholds_empty": True,
+                }
+                self.last_scan_time = cache_timestamp
+
+            self.last_scan_metadata = self.monitoring.finalize_scan(telemetry)
             self._emit_progress(progress_callback, 100, "Scan complete")
-            
             return final_list
-            
+
         except Exception as e:
             print(f"Scanner Critical Failure: {e}")
             import traceback
             traceback.print_exc()
-            if self.cache:
+            telemetry.add_note(f"critical_failure: {e}")
+            self.last_scan_metadata = self.monitoring.finalize_scan(telemetry)
+            if self.cache and self._legacy_cache_matches(runtime_context.region, normalized_strategy, thresholds):
                 print("Returning Stale Cache due to Failure")
-                return self.cache
+                return list(self.cache)[:10] if runtime_context.user_plan == "free" else list(self.cache)
             return []
 
 scanner = MarketScanner()

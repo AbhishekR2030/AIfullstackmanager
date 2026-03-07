@@ -8,7 +8,8 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "ios": "npx cap open ios"
+    "ios": "npx cap open ios",
+    "ios:sim": "./scripts/run_ios_sim.sh"
   },
   "dependencies": {
     "@capacitor/browser": "^8.0.1",

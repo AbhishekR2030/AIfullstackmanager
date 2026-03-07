@@ -2,6 +2,7 @@ import hashlib
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
+from urllib.parse import urlencode
 
 import requests
 from sqlalchemy import Column, DateTime, Integer, String, create_engine
@@ -94,10 +95,30 @@ class ZerodhaEngine:
             reset_ist = reset_ist + timedelta(days=1)
         return reset_ist.astimezone(timezone.utc).replace(tzinfo=None)
 
-    def get_login_url(self) -> Optional[str]:
+    def _kite_headers(self, access_token: Optional[str] = None) -> Dict[str, str]:
+        headers = {
+            "X-Kite-Version": "3",
+        }
+        if access_token:
+            headers["Authorization"] = f"token {self.api_key}:{access_token}"
+        return headers
+
+    def get_login_url(self, redirect_params: Optional[Dict[str, str]] = None) -> Optional[str]:
         if not self.api_key:
             return None
-        return f"{self.login_base}?api_key={self.api_key}&v=3"
+        query_params = {
+            "api_key": self.api_key,
+            "v": "3",
+        }
+        if redirect_params:
+            filtered_redirect_params = {
+                str(key): str(value)
+                for key, value in redirect_params.items()
+                if value is not None and str(value).strip()
+            }
+            if filtered_redirect_params:
+                query_params["redirect_params"] = urlencode(filtered_redirect_params)
+        return f"{self.login_base}?{urlencode(query_params)}"
 
     def exchange_request_token(self, request_token: str, user_email: str) -> Dict:
         if not self.api_key or not self.api_secret:
@@ -116,6 +137,7 @@ class ZerodhaEngine:
                     "request_token": request_token,
                     "checksum": checksum,
                 },
+                headers=self._kite_headers(),
                 timeout=15,
             )
             if response.status_code != 200:
@@ -146,10 +168,9 @@ class ZerodhaEngine:
             return token_info
 
         access_token = token_info["token"]
-        headers = {"Authorization": f"token {self.api_key}:{access_token}"}
 
         try:
-            response = requests.get(self.holdings_url, headers=headers, timeout=15)
+            response = requests.get(self.holdings_url, headers=self._kite_headers(access_token), timeout=15)
             if response.status_code in {401, 403}:
                 return {"error": "BROKER_TOKEN_EXPIRED"}
             if response.status_code != 200:
@@ -165,13 +186,15 @@ class ZerodhaEngine:
             symbol = (item.get("tradingsymbol") or "").strip().upper()
             if not symbol:
                 continue
+            exchange = (item.get("exchange") or "NSE").strip().upper()
             quantity = float(item.get("quantity", 0) or 0)
             if quantity <= 0:
                 continue
             average_price = float(item.get("average_price", 0) or 0)
+            ticker_suffix = ".BO" if exchange == "BSE" else ".NS"
             normalized.append(
                 {
-                    "ticker": f"{symbol}.NS",
+                    "ticker": f"{symbol}{ticker_suffix}",
                     "company_name": symbol,
                     "quantity": int(quantity),
                     "buy_price": average_price if average_price > 0 else float(item.get("last_price", 0) or 0),

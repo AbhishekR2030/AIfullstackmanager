@@ -4,8 +4,9 @@ import requests
 import secrets
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
-from fastapi import APIRouter, HTTPException, Depends, Request, status, Header
+from fastapi import APIRouter, HTTPException, Depends, Request, status, Header, Query
 from fastapi.responses import RedirectResponse, JSONResponse
+from jose import JWTError, jwt
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import timedelta, datetime
@@ -18,7 +19,13 @@ from app.engines.search_engine import SearchEngine
 from app.engines.hdfc_engine import HDFCEngine
 from app.engines.zerodha_engine import zerodha_engine
 from app.engines.auth_engine import auth_engine
-from app.utils.jwt_handler import create_access_token, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
+from app.utils.jwt_handler import (
+    create_access_token,
+    get_current_user,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    SECRET_KEY,
+    ALGORITHM,
+)
 from app.utils.freemium import check_daily_limit, effective_plan, is_pro_user, standard_error_payload
 
 router = APIRouter()
@@ -71,7 +78,11 @@ def _error_response(
 
 def _issue_token_for_user(user) -> str:
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    user_plan = effective_plan(getattr(user, "plan", "free"), getattr(user, "plan_expires_at", None))
+    user_plan = effective_plan(
+        getattr(user, "plan", "free"),
+        getattr(user, "plan_expires_at", None),
+        getattr(user, "email", None),
+    )
     if user_plan == "free" and getattr(user, "plan", "free") == "pro":
         auth_engine.schedule_expiry_downgrade(user.email)
 
@@ -124,6 +135,40 @@ def _build_redirect_url(base_url: str, params: dict) -> str:
         urlencode(merged_query),
         split_url.fragment
     ))
+
+
+def _create_zerodha_auth_state(user_email: str, app_redirect: Optional[str]) -> str:
+    expires_at = datetime.utcnow() + timedelta(minutes=15)
+    payload = {
+        "sub": _normalize_email(user_email),
+        "broker": "ZERODHA",
+        "purpose": "broker_connect",
+        "app_redirect": (app_redirect or "").strip(),
+        "exp": expires_at,
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _decode_zerodha_auth_state(raw_state: Optional[str]) -> Dict[str, str]:
+    if not raw_state:
+        raise ValueError("Missing broker auth state")
+
+    try:
+        payload = jwt.decode(raw_state, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError as exc:
+        raise ValueError("Invalid or expired broker auth state") from exc
+
+    if payload.get("broker") != "ZERODHA" or payload.get("purpose") != "broker_connect":
+        raise ValueError("Invalid broker auth state")
+
+    user_email = _normalize_email(payload.get("sub"))
+    if not user_email:
+        raise ValueError("Broker auth state missing user context")
+
+    return {
+        "user_email": user_email,
+        "app_redirect": (payload.get("app_redirect") or "").strip(),
+    }
 
 def _verify_google_id_token(id_token: str):
     """
@@ -219,7 +264,7 @@ async def signup(user: UserCreate, db: Session = Depends(auth_engine.get_db)):
         "token_type": "bearer",
         "user": {
             "email": created_user.email,
-            "plan": effective_plan(created_user.plan, created_user.plan_expires_at),
+            "plan": effective_plan(created_user.plan, created_user.plan_expires_at, created_user.email),
             "plan_expires_at": created_user.plan_expires_at.isoformat() if created_user.plan_expires_at else None,
         },
     }
@@ -258,7 +303,7 @@ async def login_google(data: GoogleLoginRequest, db: Session = Depends(auth_engi
         "token_type": "bearer",
         "user": {
             "email": user.email,
-            "plan": effective_plan(user.plan, user.plan_expires_at),
+            "plan": effective_plan(user.plan, user.plan_expires_at, user.email),
             "plan_expires_at": user.plan_expires_at.isoformat() if user.plan_expires_at else None,
         },
     }
@@ -285,17 +330,22 @@ async def login_json(data: LoginRequest, db: Session = Depends(auth_engine.get_d
         "token_type": "bearer",
         "user": {
             "email": user.email,
-            "plan": effective_plan(user.plan, user.plan_expires_at),
+            "plan": effective_plan(user.plan, user.plan_expires_at, user.email),
             "plan_expires_at": user.plan_expires_at.isoformat() if user.plan_expires_at else None,
         },
     }
 
 @router.get("/auth/me")
 async def read_users_me(current_user = Depends(get_current_user)):
+    user_plan = effective_plan(
+        getattr(current_user, "plan", "free"),
+        getattr(current_user, "plan_expires_at", None),
+        getattr(current_user, "email", None),
+    )
     return {
         "email": current_user.email,
         "id": current_user.id,
-        "plan": current_user.plan,
+        "plan": user_plan,
         "plan_expires_at": current_user.plan_expires_at.isoformat() if current_user.plan_expires_at else None,
     }
 
@@ -365,41 +415,94 @@ async def hdfc_login(redirect_uri: Optional[str] = None):
 
 
 @router.get("/auth/zerodha/login")
-async def zerodha_login(current_user=Depends(require_pro)):
-    login_url = zerodha_engine.get_login_url()
+async def zerodha_login(app_redirect: Optional[str] = None, current_user=Depends(require_pro)):
+    resolved_redirect = (app_redirect or "").strip() or "com.alphaseeker.india://zerodha/callback"
+    auth_state = _create_zerodha_auth_state(current_user.email, resolved_redirect)
+    login_url = zerodha_engine.get_login_url({"auth_state": auth_state})
     if not login_url:
         raise HTTPException(status_code=500, detail="Zerodha configuration missing")
-    return {"login_url": login_url, "redirect_url": login_url}
+    return {
+        "login_url": login_url,
+        "redirect_url": login_url,
+        "app_redirect": resolved_redirect,
+    }
 
 
 @router.get("/auth/zerodha/callback")
 async def zerodha_callback(
     request_token: Optional[str] = None,
-    app_redirect: Optional[str] = None,
-    current_user=Depends(require_pro),
+    auth_state: Optional[str] = None,
+    callback_status: Optional[str] = Query(default=None, alias="status"),
+    action: Optional[str] = None,
 ):
+    try:
+        state_payload = _decode_zerodha_auth_state(auth_state)
+    except ValueError as exc:
+        return _error_response(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_BROKER_STATE",
+            message=str(exc),
+        )
+
+    callback_url = state_payload.get("app_redirect") or "com.alphaseeker.india://zerodha/callback"
+
+    def _redirect_callback(payload: Dict[str, Any], fallback_status_code: int):
+        if callback_url:
+            return RedirectResponse(url=_build_redirect_url(callback_url, payload), status_code=302)
+        return _error_response(
+            status_code=fallback_status_code,
+            code=payload.get("code", "BROKER_SYNC_FAILED"),
+            message=payload.get("error") or payload.get("message") or "Broker callback failed",
+        )
+
+    if callback_status and callback_status.lower() != "success":
+        return _redirect_callback(
+            {
+                "status": "error",
+                "broker": "zerodha",
+                "error": f"Zerodha login returned status '{callback_status}'",
+                "action": action,
+                "code": "BROKER_AUTH_FAILED",
+            },
+            status.HTTP_400_BAD_REQUEST,
+        )
+
     if not request_token:
-        return _error_response(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            code="INVALID_PAYLOAD",
-            message="request_token is required",
+        return _redirect_callback(
+            {
+                "status": "error",
+                "broker": "zerodha",
+                "error": "request_token is required",
+                "action": action,
+                "code": "INVALID_PAYLOAD",
+            },
+            status.HTTP_400_BAD_REQUEST,
         )
 
-    result = zerodha_engine.exchange_request_token(request_token=request_token, user_email=current_user.email)
+    result = zerodha_engine.exchange_request_token(
+        request_token=request_token,
+        user_email=state_payload["user_email"],
+    )
     if "error" in result:
-        return _error_response(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            code="BROKER_SYNC_FAILED",
-            message=result["error"],
+        return _redirect_callback(
+            {
+                "status": "error",
+                "broker": "zerodha",
+                "error": result["error"],
+                "action": action,
+                "code": "BROKER_SYNC_FAILED",
+            },
+            status.HTTP_400_BAD_REQUEST,
         )
 
-    callback_url = app_redirect or "com.alphaseeker.india://zerodha/callback"
-    if callback_url and callback_url.startswith("com.alphaseeker.india://"):
+    if callback_url:
         redirect_url = _build_redirect_url(
             callback_url,
             {
                 "status": "success",
                 "broker": "zerodha",
+                "expires_at": result.get("expires_at"),
+                "action": action,
             },
         )
         return RedirectResponse(url=redirect_url, status_code=302)
@@ -750,7 +853,17 @@ class ScanRequestBody(BaseModel):
 
 def _normalize_strategy(strategy: Optional[str]) -> str:
     value = (strategy or "core").strip().lower()
-    return value or "core"
+    if not value:
+        return "core"
+    strategy_aliases = {
+        "alphaseeker_core": "core",
+        "custom_trade": "custom",
+        "janestreet_quant": "jane_street_stat",
+        "jane_street": "jane_street_stat",
+        "deshaw_quality": "de_shaw_multifactor",
+        "de_shaw_quality": "de_shaw_multifactor",
+    }
+    return strategy_aliases.get(value, value)
 
 
 def _extract_thresholds_payload(thresholds: Optional[ThresholdsBody]) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -763,6 +876,26 @@ def _extract_thresholds_payload(thresholds: Optional[ThresholdsBody]) -> Optiona
     return {
         "technical": technical,
         "fundamental": fundamental,
+    }
+
+
+@router.get("/discovery/strategies")
+async def get_discovery_strategies(current_user = Depends(get_current_user)):
+    """
+    Returns backend-owned strategy metadata and lock status by user plan.
+    """
+    active_plan = effective_plan(
+        getattr(current_user, "plan", "free"),
+        getattr(current_user, "plan_expires_at", None),
+        getattr(current_user, "email", None),
+    )
+    strategies = market_scanner.get_supported_strategies()
+    for strategy in strategies:
+        tier = (strategy.get("strategy_tier") or "free").strip().lower()
+        strategy["locked"] = bool(tier == "pro" and active_plan != "pro")
+    return {
+        "active_plan": active_plan,
+        "strategies": strategies,
     }
 
 # Main Discovery Scan Endpoint (POST with thresholds)
@@ -798,6 +931,7 @@ async def scan_opportunities(
         user_plan = effective_plan(
             getattr(current_user, "plan", "free"),
             getattr(current_user, "plan_expires_at", None),
+            getattr(current_user, "email", None),
         )
         buy_candidates = market_scanner.scan_market(
             thresholds=thresholds,
@@ -856,7 +990,12 @@ async def scan_opportunities(
                     "reason": f"Sell weak {sell.get('ticker')} (Trend {sell.get('trend')}, Returns {sell.get('pl_percent')}%) to buy strong {top_buy.get('ticker')} (Momentum Score {top_buy.get('score')})"
                 })
         
+        strategy_metadata = market_scanner.get_strategy_payload(strategy)
         response = {
+            "status": "complete",
+            "strategy": strategy,
+            "strategy_metadata": strategy_metadata,
+            "scan_metadata": getattr(market_scanner, "last_scan_metadata", {}) or {},
             "scan_results": buy_candidates,
             "portfolio_analysis": analyzed_holdings,
             "swap_opportunities": swap_opportunities
@@ -928,6 +1067,7 @@ async def trigger_async_scan(
         user_plan = effective_plan(
             getattr(current_user, "plan", "free"),
             getattr(current_user, "plan_expires_at", None),
+            getattr(current_user, "email", None),
         )
         task = master_scan_workflow.delay(
             request.region,
@@ -939,6 +1079,7 @@ async def trigger_async_scan(
         return {
             "job_id": task.id,
             "status": "queued",
+            "strategy": strategy,
             "message": "Scan started. Check /discovery/status/{job_id} for progress."
         }
         
@@ -1018,10 +1159,14 @@ async def get_async_scan_results(job_id: str, current_user = Depends(get_current
         results = get_scan_results(job_id)
         
         if results:
+            celery_result = task_result.result if isinstance(task_result.result, dict) else {}
+            strategy_id = _normalize_strategy(celery_result.get("strategy", "core"))
             return {
                 "job_id": job_id,
                 "state": "SUCCESS",
                 "count": len(results),
+                "strategy": strategy_id,
+                "strategy_metadata": market_scanner.get_strategy_payload(strategy_id),
                 "scan_results": results,
                 "portfolio_analysis": [],
                 "swap_opportunities": []
@@ -1030,10 +1175,13 @@ async def get_async_scan_results(job_id: str, current_user = Depends(get_current
         # Fallback to Celery result
         celery_result = task_result.result
         if celery_result and "results" in celery_result:
+            strategy_id = _normalize_strategy(celery_result.get("strategy", "core"))
             return {
                 "job_id": job_id,
                 "state": "SUCCESS",
                 "count": celery_result.get("count", 0),
+                "strategy": strategy_id,
+                "strategy_metadata": market_scanner.get_strategy_payload(strategy_id),
                 "scan_results": celery_result.get("results", []),
                 "portfolio_analysis": [],
                 "swap_opportunities": []

@@ -11,7 +11,7 @@ const resolveApiBaseUrl = () => {
         if (configuredUrl) {
             return configuredUrl;
         }
-        return 'https://alphaseeker-backend-s3pun44lha-uc.a.run.app/api/v1';
+        return 'https://alphaseeker-backend-346290058828.us-central1.run.app/api/v1';
     }
 
     if (configuredUrl) {
@@ -116,9 +116,9 @@ export const fetchPortfolioHistory = async (period = '1y') => {
     }
 };
 
-export const fetchDiscoveryScan = async (thresholds = null) => {
+export const fetchDiscoveryScan = async (strategy = 'core', thresholds = null) => {
     try {
-        const response = await api.post('/discovery/scan', { thresholds });
+        const response = await api.post('/discovery/scan', { strategy, thresholds });
         return response.data;
     } catch (error) {
         console.error("Error fetching discovery scan:", error);
@@ -126,9 +126,19 @@ export const fetchDiscoveryScan = async (thresholds = null) => {
     }
 };
 
-export const triggerAsyncDiscoveryScan = async (region = 'IN') => {
+export const fetchDiscoveryStrategies = async () => {
     try {
-        const response = await api.post('/discovery/scan/async', { region });
+        const response = await api.get('/discovery/strategies');
+        return response.data;
+    } catch (error) {
+        console.error("Error fetching discovery strategies:", error);
+        throw error;
+    }
+};
+
+export const triggerAsyncDiscoveryScan = async (region = 'IN', strategy = 'core', thresholds = null) => {
+    try {
+        const response = await api.post('/discovery/scan/async', { region, strategy, thresholds });
         return response.data;
     } catch (error) {
         console.error("Error triggering async discovery scan:", error);
@@ -192,6 +202,27 @@ export const syncHDFCPortfolio = async () => {
         return response.data;
     } catch (error) {
         console.error("Error syncing HDFC portfolio:", error);
+        throw error;
+    }
+};
+
+export const getZerodhaLoginUrl = async (appRedirect = null) => {
+    try {
+        const suffix = appRedirect ? `?app_redirect=${encodeURIComponent(appRedirect)}` : '';
+        const response = await api.get(`/auth/zerodha/login${suffix}`);
+        return response.data.login_url;
+    } catch (error) {
+        console.error("Error getting Zerodha login URL:", error);
+        return null;
+    }
+};
+
+export const syncZerodhaPortfolio = async () => {
+    try {
+        const response = await api.post('/portfolio/sync/zerodha');
+        return response.data;
+    } catch (error) {
+        console.error("Error syncing Zerodha portfolio:", error);
         throw error;
     }
 };

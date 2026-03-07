@@ -5,6 +5,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from app.engines.auth_engine import auth_engine, SessionLocal
+from app.utils.freemium import effective_plan
 import os
 
 # Secret Key (in prod, load from .env)
@@ -78,14 +79,19 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         finally:
             db.close()
 
-    if plan == "pro" and expiry and expiry <= datetime.utcnow():
-        plan = "free"
+    resolved_plan = effective_plan(plan, expiry, email=email)
+    if (
+        resolved_plan == "free"
+        and plan == "pro"
+        and expiry
+        and expiry <= datetime.utcnow()
+    ):
         auth_engine.schedule_expiry_downgrade(email)
 
     return AuthenticatedUser(
         id=user_id,
         email=email,
-        plan=plan if plan in {"free", "pro"} else "free",
+        plan=resolved_plan if resolved_plan in {"free", "pro"} else "free",
         plan_expires_at=expiry,
         is_active=True,
     )

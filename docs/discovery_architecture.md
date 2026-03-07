@@ -1,6 +1,8 @@
 # Discovery Module - Backend Architecture
 
-The Discovery module is the quantitative stock screening engine of AlphaSeeker. It identifies high-potential buy opportunities and portfolio rebalancing suggestions using a **multi-stage filtering pipeline**.
+The Discovery module is the quantitative stock screening engine of AlphaSeeker. It identifies high-potential buy opportunities and portfolio rebalancing suggestions using a **hybrid architecture**:
+- shared platform services (data, risk, execution simulation, accounting, monitoring)
+- strategy-specific alpha pipelines (features, filters, scoring, ranking)
 
 ---
 
@@ -9,49 +11,53 @@ The Discovery module is the quantitative stock screening engine of AlphaSeeker. 
 ```mermaid
 flowchart TB
     subgraph Frontend
-        A["📱 Discovery UI<br/>Scan Now Button"]
+        A["Discovery UI<br/>Scan Now"]
     end
-    
+
     subgraph API["FastAPI Layer"]
         B["/discovery/scan<br/>routes.py"]
     end
-    
-    subgraph Engines["Core Engines"]
-        C["MarketScanner<br/>scanner_engine.py"]
-        D["RebalancerEngine<br/>rebalancer_engine.py"]
-        E["AnalystEngine<br/>analyst_engine.py"]
-        F["PortfolioEngine<br/>portfolio_engine.py"]
+
+    subgraph Shared["Shared Platform Services"]
+        C["DataPlatformService"]
+        D["RiskGuardService"]
+        E["ExecutionSimulationService"]
+        F["PortfolioAccountingService"]
+        G["MonitoringService"]
     end
-    
-    subgraph DataLayer["Data Layer"]
-        G["MarketLoader<br/>market_loader.py"]
-        H["NIFTY_500_TICKERS<br/>tickers.py"]
+
+    subgraph Strategies["Strategy Pipelines"]
+        H["CorePipeline"]
+        I["MomentumPipeline"]
+        J["StatArbPipeline"]
+        K["QualityPipeline"]
+        L["MultiFactorPipeline"]
+        M["CustomPipeline"]
     end
-    
-    subgraph External["External APIs"]
-        I["Yahoo Finance<br/>(yfinance)"]
-        J["Perplexity API<br/>(Fundamentals)"]
-        K["Google Gemini<br/>(AI Thesis)"]
+
+    subgraph Adjacent["Adjacent Engines"]
+        N["RebalancerEngine"]
+        O["AnalystEngine"]
     end
-    
-    A -->|HTTP GET| B
-    B --> C
-    B --> D
-    B --> E
-    B --> F
-    
-    C --> G
-    G --> H
-    G --> I
-    C --> J
-    
-    D --> F
-    E --> K
-    E --> I
-    
-    C -->|"buy_candidates"| B
-    D -->|"portfolio_analysis"| B
-    B -->|JSON Response| A
+
+    subgraph External["External Data/AI"]
+        P["Yahoo Finance"]
+        Q["Google Gemini"]
+    end
+
+    A --> B
+    B --> C --> D --> E --> F --> G
+    B --> H
+    B --> I
+    B --> J
+    B --> K
+    B --> L
+    B --> M
+    C --> P
+    O --> Q
+    B --> N
+    B --> O
+    B --> A
 ```
 
 ---
@@ -59,83 +65,48 @@ flowchart TB
 ## Key Components
 
 ### 1. API Endpoint: `/discovery/scan`
-**File:** [routes.py](file:///c:/Users/chabh/Documents/AlphaSeeker/backend/app/api/routes.py#L221-L294)
+**File:** `backend/app/api/routes.py`
 
-The main entry point that orchestrates the entire discovery flow:
-
-| Step | Action | Engine Used |
-|------|--------|-------------|
-| 1 | Scan market for buy candidates | `MarketScanner` |
-| 2 | Fetch user portfolio | `PortfolioEngine` |
-| 3 | Analyze portfolio for rebalancing | `RebalancerEngine` |
-| 4 | Generate AI thesis for top pick | `AnalystEngine` |
-| 5 | Create swap recommendations | Route logic |
+The route orchestrates:
+1. strategy selection + entitlement checks
+2. shared platform service calls
+3. selected strategy pipeline execution
+4. portfolio rebalance enrichment
+5. optional top-pick thesis generation
 
 ---
 
-### 2. MarketScanner (Core Scanner Engine)
-**File:** [scanner_engine.py](file:///c:/Users/chabh/Documents/AlphaSeeker/backend/app/engines/scanner_engine.py)
+### 2. Strategy Orchestrator (Core Scanner Engine)
+**File:** `backend/app/engines/scanner_engine.py`
 
-The **heart of the Discovery module** - a 6-stage quantitative screening pipeline:
+`MarketScanner` serves as orchestration layer:
+- resolve strategy id and parameters
+- run shared platform gates
+- invoke strategy-specific alpha pipeline
+- normalize output to common response contract
 
-```mermaid
-flowchart LR
-    subgraph Stage1["Stage 1: Universe"]
-        S1["Load 500+ Tickers<br/>(NIFTY 500 + ETFs)"]
-    end
-    
-    subgraph Stage2["Stage 2: Tech Fetch"]
-        S2["Batch Download<br/>3-Month History<br/>(Yahoo Finance)"]
-    end
-    
-    subgraph Stage3["Stage 3: Tech Screen"]
-        S3["Liquidity Filter<br/>Volatility Filter<br/>Momentum Filter<br/>RSI + MACD"]
-    end
-    
-    subgraph Stage4["Stage 4: Select Top 5"]
-        S4["Sort by<br/>Volume Shock"]
-    end
-    
-    subgraph Stage5["Stage 5: Fundamentals"]
-        S5["Perplexity API<br/>Revenue Growth<br/>ROE, Debt/Equity"]
-    end
-    
-    subgraph Stage6["Stage 6: Score + Rank"]
-        S6["Upside Score<br/>(0-100)"]
-    end
-    
-    S1 --> S2 --> S3 --> S4 --> S5 --> S6
-```
+#### Shared Platform Responsibilities
 
-#### Stage 3: Technical Screening Criteria
+| Layer | Responsibility |
+|-------|----------------|
+| Data Platform | Universe + OHLCV/fundamentals ingestion and cache |
+| Risk Guard | Hard safety and tradability checks |
+| Execution Simulation | Slippage and executable-liquidity adjustments |
+| Portfolio Accounting | PnL/exposure-aware enrichment for replacement logic |
+| Monitoring | Scan telemetry, rejection metrics, drift and latency |
 
-| Filter | Condition | Purpose |
-|--------|-----------|---------|
-| **Liquidity** | Daily Turnover > $1M | Ensure tradeable stocks |
-| **Volatility** | 3% < Monthly Vol < 8% | Goldilocks zone |
-| **Momentum SMA** | Price > SMA-50 AND SMA-20 | Uptrend confirmation |
-| **RSI** | 50 ≤ RSI ≤ 70 | Healthy momentum, not overbought |
-| **Volume Shock** | Current Vol > 1.5× Avg Vol | Institutional interest |
-| **MACD** | Histogram > 0 | Bullish crossover |
+#### Strategy-Owned Responsibilities
 
-#### Stage 5: Fundamental Checks (via Perplexity)
+| Strategy | Primary Alpha Behavior |
+|----------|------------------------|
+| Alphaseeker Core | Balanced baseline momentum + quality |
+| Citadel Momentum | Continuation momentum with volume confirmation |
+| Jane Street Statistical | Mean-reversion/statistical dislocation logic |
+| Millennium Quality | Quality/profitability stability focus |
+| DE Shaw Multi-Factor | Multi-factor blend (momentum + quality + valuation) |
+| Custom Thresholds | User-defined tuning path |
 
-| Metric | Threshold | Rationale |
-|--------|-----------|-----------|
-| Revenue Growth | ≥ 15% YoY | Growth stock criteria |
-| Return on Equity | ≥ 18% | Profitability threshold |
-| Debt/Equity | < 100% | Financial stability |
-
-#### Stage 6: Scoring Algorithm
-
-```
-Total Score = (Fundamental × 0.4) + (Momentum × 0.3) + (Valuation × 0.3)
-
-Where:
-- Fundamental Score = (Revenue Growth × 0.5) + (ROE × 0.5)
-- Momentum Score = (RSI × 0.7) + (MACD Signal × 0.3)
-- Valuation Score = Upside % to Target Price
-```
+All strategies must emit normalized `score` (0–100), rationale metadata, and risk flags.
 
 ---
 
@@ -179,46 +150,29 @@ Generates AI-powered investment thesis using **Google Gemini**:
 sequenceDiagram
     participant UI as Discovery UI
     participant API as /discovery/scan
-    participant Scanner as MarketScanner
-    participant Loader as MarketLoader
-    participant YF as Yahoo Finance
-    participant PPL as Perplexity API
+    participant Scanner as Strategy Orchestrator
+    participant Shared as Shared Platform Services
+    participant Strategy as Selected Strategy Pipeline
     participant Rebal as RebalancerEngine
     participant Analyst as AnalystEngine
     participant Gemini as Google Gemini
-    
-    UI->>API: GET /discovery/scan
-    
-    rect rgb(230, 245, 255)
-        Note over API,YF: Step 1: Market Scan
-        API->>Scanner: scan_market()
-        Scanner->>Loader: get_india_tickers()
-        Loader-->>Scanner: 500+ tickers
-        Scanner->>Loader: fetch_data(period=3mo)
-        Loader->>YF: Batch Download
-        YF-->>Scanner: Price/Volume Data
-        Scanner->>Scanner: Technical Screening
-        Scanner->>PPL: Fetch Fundamentals (Top 5)
-        PPL-->>Scanner: Revenue, ROE, Debt
-        Scanner->>Scanner: Score & Rank
-        Scanner-->>API: buy_candidates[]
-    end
-    
-    rect rgb(255, 245, 230)
-        Note over API,Rebal: Step 2: Portfolio Analysis
-        API->>Rebal: analyze_portfolio()
-        Rebal-->>API: analyzed_holdings[]
-    end
-    
-    rect rgb(230, 255, 230)
-        Note over API,Gemini: Step 3: AI Thesis (Top Pick)
-        API->>Analyst: generate_thesis(top_pick)
-        Analyst->>YF: Fetch News
-        Analyst->>Gemini: Generate Analysis
-        Gemini-->>Analyst: Thesis JSON
-        Analyst-->>API: thesis, risk_factors
-    end
-    
+
+    UI->>API: POST /discovery/scan {strategy, thresholds}
+    API->>Scanner: run_scan(strategy, thresholds, user_context)
+    Scanner->>Shared: data + risk + execution + accounting
+    Shared-->>Scanner: validated feature base
+    Scanner->>Strategy: build/filter/score/rank
+    Strategy-->>Scanner: normalized candidates
+    Scanner-->>API: scan_results
+
+    API->>Rebal: analyze_portfolio()
+    Rebal-->>API: portfolio_analysis + swap_opportunities
+
+    API->>Analyst: generate_thesis(top_pick)
+    Analyst->>Gemini: Generate Analysis
+    Gemini-->>Analyst: Thesis JSON
+    Analyst-->>API: thesis payload
+
     API-->>UI: {scan_results, portfolio_analysis, swap_opportunities}
 ```
 
@@ -277,7 +231,7 @@ if self.cache and (time.time() - self.last_scan_time < CACHE_DURATION):
 | File | Purpose |
 |------|---------|
 | [routes.py](file:///c:/Users/chabh/Documents/AlphaSeeker/backend/app/api/routes.py) | API endpoint `/discovery/scan` |
-| [scanner_engine.py](file:///c:/Users/chabh/Documents/AlphaSeeker/backend/app/engines/scanner_engine.py) | Core 6-stage scanning pipeline |
+| [scanner_engine.py](file:///c:/Users/chabh/Documents/AlphaSeeker/backend/app/engines/scanner_engine.py) | Hybrid strategy orchestration + shared platform integration |
 | [market_loader.py](file:///c:/Users/chabh/Documents/AlphaSeeker/backend/app/engines/market_loader.py) | Stock universe & data fetching |
 | [analyst_engine.py](file:///c:/Users/chabh/Documents/AlphaSeeker/backend/app/engines/analyst_engine.py) | AI thesis generation (Gemini) |
 | [rebalancer_engine.py](file:///c:/Users/chabh/Documents/AlphaSeeker/backend/app/engines/rebalancer_engine.py) | Portfolio rebalancing logic |

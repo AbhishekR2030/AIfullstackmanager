@@ -1,6 +1,15 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getPortfolio, addTrade, deleteTrade, searchStocks, syncHDFCPortfolio, getHDFCLoginUrl } from '../services/api';
+import {
+    getPortfolio,
+    addTrade,
+    deleteTrade,
+    searchStocks,
+    syncHDFCPortfolio,
+    getHDFCLoginUrl,
+    syncZerodhaPortfolio,
+    getZerodhaLoginUrl,
+} from '../services/api';
 import {
     ArrowRight,
     Building2,
@@ -24,12 +33,13 @@ import {
 import './Portfolio.css';
 
 const MOBILE_HDFC_REDIRECT = 'com.alphaseeker.india://auth/callback';
+const MOBILE_ZERODHA_REDIRECT = 'com.alphaseeker.india://zerodha/callback';
 const HOLDING_SEGMENTS = ['Holdings', 'MTF', 'Mutual Fund', 'Others'];
 const CONNECTORS = [
     {
         id: 'hdfc',
         name: 'HDFC InvestRight',
-        subtitle: 'Active connector',
+        subtitle: 'Tap to connect and sync',
         status: 'active',
     },
     {
@@ -41,8 +51,8 @@ const CONNECTORS = [
     {
         id: 'zerodha-kite',
         name: 'Zerodha Kite',
-        subtitle: 'Coming soon',
-        status: 'coming-soon',
+        subtitle: 'Tap to connect and sync',
+        status: 'active',
     },
 ];
 
@@ -65,7 +75,7 @@ const formatSignedPercent = (value) => {
     return `${numericValue >= 0 ? '+' : ''}${numericValue.toFixed(2)}%`;
 };
 
-const getSyncErrorMessage = (error) => {
+const getSyncErrorMessage = (error, brokerName = 'Broker') => {
     if (!error?.response) {
         return "Unable to reach backend. Check network connectivity.";
     }
@@ -83,8 +93,14 @@ const getSyncErrorMessage = (error) => {
     if (typeof data?.message === 'string' && data.message.trim()) {
         return data.message;
     }
+    if (typeof data?.error?.message === 'string' && data.error.message.trim()) {
+        return data.error.message;
+    }
+    if (typeof data?.error === 'string' && data.error.trim()) {
+        return data.error;
+    }
 
-    return `HDFC sync failed (${status})`;
+    return `${brokerName} sync failed (${status})`;
 };
 
 const Portfolio = () => {
@@ -237,6 +253,25 @@ const Portfolio = () => {
         }
     };
 
+    const startZerodhaAuthorization = async () => {
+        const appRedirect = Capacitor.isNativePlatform() ? MOBILE_ZERODHA_REDIRECT : null;
+        const loginUrl = await getZerodhaLoginUrl(appRedirect);
+        if (!loginUrl) {
+            showNotice('error', "Could not get Zerodha login URL from backend.");
+            return;
+        }
+
+        try {
+            const { Browser } = await import('@capacitor/browser');
+            await Browser.open({ url: loginUrl });
+            showNotice('warning', "Complete Zerodha login and return to app. Sync will continue automatically.");
+        } catch (browserErr) {
+            console.log("Browser plugin not available, opening in new tab", browserErr);
+            window.open(loginUrl, '_blank');
+            showNotice('warning', "Complete Zerodha login in the new tab and then come back.");
+        }
+    };
+
     const handleSyncHDFC = async () => {
         setIsSyncing(true);
         try {
@@ -264,10 +299,44 @@ const Portfolio = () => {
         }
     };
 
+    const handleSyncZerodha = async () => {
+        setIsSyncing(true);
+        try {
+            await syncZerodhaPortfolio();
+            await loadPortfolio({ background: true });
+            showNotice('success', "Portfolio synced successfully from Zerodha.");
+        } catch (error) {
+            const syncErrorMessage = getSyncErrorMessage(error, 'Zerodha');
+            const statusCode = error?.response?.status;
+            const errorCode = error?.response?.data?.error?.code;
+            console.error("Zerodha sync failed:", syncErrorMessage, error);
+
+            const needsAuthorization = statusCode === 401
+                || statusCode === 403
+                || errorCode === 'BROKER_TOKEN_EXPIRED'
+                || /authorization|expired|token|unauthoriz|login|connect|\b401\b|\b403\b/i.test(syncErrorMessage);
+
+            if (!needsAuthorization) {
+                showNotice('error', `Zerodha sync failed: ${syncErrorMessage}`);
+                return;
+            }
+
+            showNotice('warning', "Zerodha session expired or missing. Re-authorizing now.");
+            await startZerodhaAuthorization();
+        } finally {
+            setIsSyncing(false);
+        }
+    };
+
     const handleConnectorSync = async (connectorId) => {
         if (connectorId === 'hdfc') {
             setShowSyncModal(false);
             await handleSyncHDFC();
+            return;
+        }
+        if (connectorId === 'zerodha-kite') {
+            setShowSyncModal(false);
+            await handleSyncZerodha();
             return;
         }
 
@@ -514,7 +583,7 @@ const Portfolio = () => {
                             <div className="portfolio-loading">Fetching live prices...</div>
                         ) : sortedHoldings.length === 0 ? (
                             <div className="portfolio-empty">
-                                <p>No holdings yet. Add your first trade or sync from HDFC.</p>
+                                <p>No holdings yet. Add your first trade or sync from HDFC or Zerodha.</p>
                             </div>
                         ) : (
                             <div className="holding-list">
@@ -611,7 +680,7 @@ const Portfolio = () => {
                                             </div>
                                         </div>
                                         <span className={`connector-state ${isActive ? 'active' : 'soon'}`}>
-                                            {isActive ? 'Connected' : 'Coming soon'}
+                                            {isActive ? 'Available' : 'Coming soon'}
                                         </span>
                                     </button>
                                 );

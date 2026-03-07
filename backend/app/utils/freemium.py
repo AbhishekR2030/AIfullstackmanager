@@ -1,10 +1,40 @@
+import os
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.engines.auth_engine import UsageLog
+
+
+DEFAULT_BUILDER_EMAILS = {"chabhishekreddy@gmail.com"}
+
+
+def normalize_email(email: Optional[str]) -> str:
+    return (email or "").strip().lower()
+
+
+def canonical_email(email: Optional[str]) -> str:
+    normalized = normalize_email(email)
+    if "@" not in normalized:
+        return normalized
+    local_part, domain_part = normalized.split("@", 1)
+    if domain_part in {"gmail.com", "googlemail.com"}:
+        local_part = local_part.split("+", 1)[0].replace(".", "")
+        domain_part = "gmail.com"
+    return f"{local_part}@{domain_part}"
+
+
+def _builder_email_allowlist() -> Set[str]:
+    env_value = os.getenv("BUILDER_EMAIL_ALLOWLIST", "")
+    env_emails = {canonical_email(item) for item in env_value.split(",") if item.strip()}
+    default_emails = {canonical_email(item) for item in DEFAULT_BUILDER_EMAILS}
+    return default_emails | env_emails
+
+
+def is_builder_email(email: Optional[str]) -> bool:
+    return canonical_email(email) in _builder_email_allowlist()
 
 
 def standard_error_payload(
@@ -23,7 +53,9 @@ def standard_error_payload(
     }
 
 
-def effective_plan(plan: Optional[str], plan_expires_at: Optional[datetime]) -> str:
+def effective_plan(plan: Optional[str], plan_expires_at: Optional[datetime], email: Optional[str] = None) -> str:
+    if is_builder_email(email):
+        return "pro"
     normalized = (plan or "free").strip().lower()
     if normalized != "pro":
         return "free"
@@ -36,6 +68,7 @@ def is_pro_user(user: Any) -> bool:
     return effective_plan(
         getattr(user, "plan", "free"),
         getattr(user, "plan_expires_at", None),
+        getattr(user, "email", None),
     ) == "pro"
 
 
@@ -46,7 +79,9 @@ def check_daily_limit(user_email: str, action: str, limit: int, db: Session) -> 
     if limit <= 0:
         return False
 
-    normalized_email = (user_email or "").strip().lower()
+    normalized_email = normalize_email(user_email)
+    if is_builder_email(normalized_email):
+        return False
     if not normalized_email:
         return True
 

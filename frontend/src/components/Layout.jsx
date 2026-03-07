@@ -1,12 +1,17 @@
 import React, { useEffect } from 'react';
 import { Link, useLocation, useNavigate, Outlet } from 'react-router-dom';
-import { handleHDFCCallback, syncHDFCPortfolio } from '../services/api';
+import { handleHDFCCallback, syncHDFCPortfolio, syncZerodhaPortfolio } from '../services/api';
 import { clearAuth } from '../services/authStorage';
 import {
     consumePendingHdfcCallback,
     hasHdfcCallbackParams,
     persistPendingHdfcCallback,
 } from '../services/hdfcCallbackStorage';
+import {
+    consumePendingZerodhaCallback,
+    hasZerodhaCallbackParams,
+    persistPendingZerodhaCallback,
+} from '../services/zerodhaCallbackStorage';
 import { LayoutDashboard, Telescope, PieChart, LogOut } from 'lucide-react';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Capacitor, registerPlugin } from '@capacitor/core';
@@ -60,14 +65,45 @@ const Layout = ({ children }) => {
             }
         };
 
+        const handleZerodhaResult = async (params, clearWebQuery = false) => {
+            const broker = (params.get('broker') || '').trim().toLowerCase();
+            const status = (params.get('status') || '').trim().toLowerCase();
+            const error = params.get('error');
+
+            if (broker !== 'zerodha' || !status) {
+                return;
+            }
+
+            try {
+                if (status !== 'success') {
+                    throw new Error(error || 'Zerodha authorization failed');
+                }
+
+                await syncZerodhaPortfolio();
+                alert("Zerodha Login Successful! Portfolio Synced.");
+            } catch (callbackError) {
+                console.error("Zerodha Callback Error:", callbackError);
+                alert(error || callbackError?.message || "Failed to complete Zerodha Login.");
+            } finally {
+                if (clearWebQuery) {
+                    navigate(location.pathname, { replace: true });
+                }
+            }
+        };
+
         // Web fallback flow: callback params in current URL.
         const currentParams = new URLSearchParams(location.search);
         handleHDFCResult(currentParams, true);
+        handleZerodhaResult(currentParams, true);
 
         // Cold-start fallback: process callback captured while login route was active.
         const pendingParams = consumePendingHdfcCallback();
         if (pendingParams && hasHdfcCallbackParams(pendingParams)) {
             handleHDFCResult(pendingParams, false);
+        }
+        const pendingZerodhaParams = consumePendingZerodhaCallback();
+        if (pendingZerodhaParams && hasZerodhaCallbackParams(pendingZerodhaParams)) {
+            handleZerodhaResult(pendingZerodhaParams, false);
         }
 
         // Native flow: callback opened via deep link.
@@ -93,7 +129,11 @@ const Layout = ({ children }) => {
                             if (hasHdfcCallbackParams(deepLinkParams)) {
                                 persistPendingHdfcCallback(deepLinkParams);
                             }
+                            if (hasZerodhaCallbackParams(deepLinkParams)) {
+                                persistPendingZerodhaCallback(deepLinkParams);
+                            }
                             handleHDFCResult(deepLinkParams, false);
+                            handleZerodhaResult(deepLinkParams, false);
                         } catch (parseError) {
                             console.error("Failed to parse deep link URL", parseError);
                         }
