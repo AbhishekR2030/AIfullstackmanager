@@ -60,3 +60,44 @@ class JaneStreetStatPipeline(BaseStrategyPipeline):
             f"Volatility {features.get('monthly_vol', 0):.1f}% | "
             "Flow dislocation candidate"
         )
+
+    def project_target(self, current_price, features, info_proxy, context, config):
+        analyst_upside = self._analyst_upside(current_price, info_proxy)
+        reversion = self._reversion_factor(features)
+        quality = self._quality_factor(info_proxy)
+        valuation = self._valuation_factor(info_proxy, analyst_upside)
+        stability = self._stability_factor(features, info_proxy)
+        liquidity = self._normalise(float(features.get("vol_shock", 1.0)), 1.0, 2.4)
+        risk = self._risk_penalty(features, info_proxy)
+
+        model_upside = (
+            0.025
+            + (0.06 * reversion)
+            + (0.02 * valuation)
+            + (0.02 * quality)
+            + (0.015 * stability)
+            + (0.01 * liquidity)
+            - (0.02 * risk)
+        )
+        blended_upside, source = self._blend_upside(model_upside, analyst_upside, analyst_weight=0.2)
+        final_upside = self._clamp(blended_upside, 0.02, 0.12)
+        signal_strength = self._clamp(
+            (0.42 * reversion) + (0.18 * liquidity) + (0.18 * valuation) + (0.12 * quality) + (0.10 * stability),
+            0.0,
+            1.0,
+        )
+        return self._build_projection(
+            current_price=current_price,
+            upside_pct=final_upside,
+            source=source,
+            model_name="jane_street_stat_target_model",
+            max_upside=0.12,
+            signal_strength=signal_strength,
+            components={
+                "reversion": round(reversion, 4),
+                "valuation": round(valuation, 4),
+                "quality": round(quality, 4),
+                "stability": round(stability, 4),
+                "risk": round(risk, 4),
+            },
+        )

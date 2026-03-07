@@ -155,8 +155,10 @@ class YahooFundamentalsEngine:
             # Valuation metrics
             "pe_ratio": safe_float(info.get("trailingPE"), 0),
             "forward_pe": safe_float(info.get("forwardPE"), 0),
+            "peg_ratio": safe_float(info.get("pegRatio"), 0),
             "price_to_book": safe_float(info.get("priceToBook"), 0),
             "price_to_sales": safe_float(info.get("priceToSalesTrailing12Months"), 0),
+            "target_mean_price": safe_float(info.get("targetMeanPrice"), 0),
             
             # Additional info
             "sector": info.get("sector", "Unknown"),

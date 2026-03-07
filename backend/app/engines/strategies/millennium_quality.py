@@ -64,3 +64,39 @@ class MillenniumQualityPipeline(BaseStrategyPipeline):
             f"Quality tilt | Vol shock {features.get('vol_shock', 1):.2f}x | "
             f"RSI {features.get('rsi', 50):.1f} with durable trend filter"
         )
+
+    def project_target(self, current_price, features, info_proxy, context, config):
+        analyst_upside = self._analyst_upside(current_price, info_proxy)
+        quality = self._quality_factor(info_proxy)
+        stability = self._stability_factor(features, info_proxy)
+        valuation = self._valuation_factor(info_proxy, analyst_upside)
+        momentum = self._momentum_factor(features)
+        risk = self._risk_penalty(features, info_proxy)
+
+        durability = self._clamp((0.58 * quality) + (0.42 * stability), 0.0, 1.0)
+        model_upside = (
+            0.04
+            + (0.075 * quality)
+            + (0.04 * durability)
+            + (0.025 * valuation)
+            + (0.01 * momentum)
+            - (0.025 * risk)
+        )
+        blended_upside, source = self._blend_upside(model_upside, analyst_upside, analyst_weight=0.65)
+        final_upside = self._clamp(blended_upside, 0.04, 0.18)
+        signal_strength = self._clamp((0.42 * quality) + (0.24 * durability) + (0.2 * valuation) + (0.14 * stability), 0.0, 1.0)
+        return self._build_projection(
+            current_price=current_price,
+            upside_pct=final_upside,
+            source=source,
+            model_name="millennium_quality_target_model",
+            max_upside=0.18,
+            signal_strength=signal_strength,
+            components={
+                "quality": round(quality, 4),
+                "durability": round(durability, 4),
+                "valuation": round(valuation, 4),
+                "stability": round(stability, 4),
+                "risk": round(risk, 4),
+            },
+        )

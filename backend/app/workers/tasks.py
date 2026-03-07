@@ -22,6 +22,8 @@ import os
 from app.core.celery_app import celery_app
 from app.engines.market_loader import market_loader
 from app.engines.scanner_engine import scanner as market_scanner
+from app.engines.strategy_base import ScanRuntimeContext
+from app.engines.strategies.core import CoreStrategyPipeline
 
 # Redis client for progress tracking
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -289,41 +291,73 @@ def update_progress(job_id: str, message: str, percent: int):
 def calculate_upside_score(cand: Dict[str, Any]) -> Dict[str, float]:
     """Calculate upside score for a candidate stock."""
     try:
-        rsi = cand.get("rsi", 50)
-        
-        # RSI-based momentum score
-        rsi_score = np.clip((rsi - 50) * 5, 0, 100)
-        
-        # MACD is positive (already filtered), so give full points
-        macd_score = 100
-        
-        # Combined momentum
+        pipeline = CoreStrategyPipeline()
+        current_price = float(cand.get("price", 0.0) or 0.0)
+        features = {
+            "current_price": current_price,
+            "rsi": float(cand.get("rsi", 50.0) or 50.0),
+            "macd_hist": float(cand.get("macd_hist", 1.0) or 1.0),
+            "vol_shock": float(cand.get("vol_shock", 1.0) or 1.0),
+            "monthly_vol": float(cand.get("monthly_vol", 6.0) or 6.0),
+            "sma_20": float(cand.get("sma_20", current_price) or current_price),
+            "sma_50": float(cand.get("sma_50", current_price) or current_price),
+            "rsi_slope_5": float(cand.get("rsi_slope_5", 0.0) or 0.0),
+        }
+        info_proxy = {
+            "quoteType": "EQUITY",
+            "revenueGrowth": float(cand.get("revenue_growth", 0.0) or 0.0),
+            "profitGrowth": float(cand.get("profit_growth", 0.0) or 0.0),
+            "returnOnEquity": float(cand.get("roe", 0.0) or 0.0),
+            "roce": float(cand.get("roce", cand.get("roe", 0.0)) or 0.0),
+            "debtToEquity": float(cand.get("debt_to_equity", 0.0) or 0.0),
+            "beta": float(cand.get("beta", 1.0) or 1.0),
+            "trailingPE": float(cand.get("trailing_pe", 0.0) or 0.0),
+            "forwardPE": float(cand.get("forward_pe", 0.0) or 0.0),
+            "pegRatio": float(cand.get("peg_ratio", 0.0) or 0.0),
+            "targetMeanPrice": float(cand.get("target_mean_price", 0.0) or 0.0),
+        }
+        projection = pipeline.project_target(
+            current_price=current_price,
+            features=features,
+            info_proxy=info_proxy,
+            context=ScanRuntimeContext(
+                region="IN",
+                strategy_id="core",
+                thresholds={},
+                user_plan="pro",
+                volatility_min=3.0,
+                volatility_max=8.0,
+            ),
+            config=market_scanner._resolve_scan_config(strategy="core", thresholds={}),
+        )
+
+        rsi_score = np.clip((features["rsi"] - 50) * 5, 0, 100)
+        macd_score = 100 if features["macd_hist"] > 0 else 0
         mom_score = (rsi_score * 0.7) + (macd_score * 0.3)
-        
-        # Fundamental score (placeholder - simplified)
-        fund_score = 70  # Default for technical pass
-        
-        # Valuation score based on volume shock
-        vol_shock = cand.get("vol_shock", 1.0)
-        val_score = min(vol_shock * 30, 100)
-        
-        # Estimated upside
-        upside_pct = min(vol_shock * 5, 25)  # Cap at 25%
-        
-        # Total score
-        total_score = (fund_score * 0.4) + (mom_score * 0.3) + (val_score * 0.3)
-        
+        quality = 70.0 if info_proxy["quoteType"] == "ETF" else np.clip(
+            (info_proxy["revenueGrowth"] * 500 * 0.5) + (info_proxy["returnOnEquity"] * 400 * 0.5),
+            0,
+            100,
+        )
+        total_score = (quality * 0.4) + (mom_score * 0.3) + (projection.valuation_score * 0.3)
+
         return {
             "total_score": round(float(total_score), 2),
-            "upside_pct": round(float(upside_pct), 1),
-            "momentum_score": round(float(mom_score), 1)
+            "upside_pct": round(float(projection.upside_pct) * 100, 1),
+            "momentum_score": round(float(mom_score), 1),
+            "target_price": round(float(projection.target_price), 2),
+            "target_source": projection.source,
+            "target_model": projection.model_name,
         }
         
     except Exception:
         return {
             "total_score": 50.0,
             "upside_pct": 0.0,
-            "momentum_score": 50.0
+            "momentum_score": 50.0,
+            "target_price": 0.0,
+            "target_source": "unavailable",
+            "target_model": "unavailable",
         }
 
 

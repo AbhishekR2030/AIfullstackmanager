@@ -52,3 +52,36 @@ class CitadelMomentumPipeline(BaseStrategyPipeline):
             f"Volume shock {features.get('vol_shock', 1):.2f}x | "
             "Trend aligned above SMA20/SMA50"
         )
+
+    def project_target(self, current_price, features, info_proxy, context, config):
+        analyst_upside = self._analyst_upside(current_price, info_proxy)
+        momentum = self._momentum_factor(features)
+        trend_strength = self._normalise(float(features.get("rsi_slope_5", 0.0)), 0.0, 8.0)
+        liquidity = self._normalise(float(features.get("vol_shock", 1.0)), 1.2, 3.5)
+        quality = self._quality_factor(info_proxy)
+        valuation = self._valuation_factor(info_proxy, analyst_upside)
+        risk = self._risk_penalty(features, info_proxy)
+
+        continuation = self._clamp(
+            (0.45 * momentum) + (0.3 * trend_strength) + (0.25 * liquidity),
+            0.0,
+            1.0,
+        )
+        model_upside = 0.045 + (0.09 * continuation) + (0.03 * quality) + (0.02 * valuation) - (0.025 * risk)
+        blended_upside, source = self._blend_upside(model_upside, analyst_upside, analyst_weight=0.35)
+        final_upside = self._clamp(blended_upside, 0.05, 0.24)
+        signal_strength = self._clamp((0.52 * continuation) + (0.24 * quality) + (0.24 * valuation), 0.0, 1.0)
+        return self._build_projection(
+            current_price=current_price,
+            upside_pct=final_upside,
+            source=source,
+            model_name="citadel_momentum_target_model",
+            max_upside=0.24,
+            signal_strength=signal_strength,
+            components={
+                "continuation": round(continuation, 4),
+                "quality": round(quality, 4),
+                "valuation": round(valuation, 4),
+                "risk": round(risk, 4),
+            },
+        )

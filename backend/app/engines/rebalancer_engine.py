@@ -8,6 +8,9 @@ except ImportError:
     ta = None
 import yfinance as yf
 import numpy as np
+from app.engines.scanner_engine import ALPHASEEKER_CORE
+from app.engines.strategies.core import CoreStrategyPipeline
+from app.engines.strategy_base import ScanRuntimeContext
 
 
 class RebalancerEngine:
@@ -240,20 +243,60 @@ class RebalancerEngine:
                 roe_score = np.clip(roe * 400, 0, 100)
                 fund_score = (rev_score * 0.5) + (roe_score * 0.5)
 
-            # --- 3. Valuation/Upside Score (30%) ---
-            current_price = df['Close'].iloc[-1]
-            target_price = info.get('targetMeanPrice', None)
-            
-            upside_pct = 0
-            if target_price and target_price > 0:
-                upside_pct = (target_price - current_price) / current_price
-            else:
-                peg = info.get('pegRatio', 0)
-                if peg and 0 < peg < 1.0: upside_pct = 0.20
-                elif peg and peg < 1.5: upside_pct = 0.10
-                else: upside_pct = 0.05
-            
-            val_score = np.clip(upside_pct * 500, 0, 100)
+            # --- 3. Strategy-backed valuation/target model ---
+            current_price = float(df['Close'].iloc[-1])
+            avg_vol_20 = float(df['Volume'].rolling(20).mean().iloc[-1]) if 'Volume' in df else 0.0
+            current_vol = float(df['Volume'].iloc[-1]) if 'Volume' in df else avg_vol_20
+            monthly_vol = float(df['Close'].pct_change().tail(30).std() * (21 ** 0.5) * 100)
+            sma_20 = float(df['Close'].rolling(20).mean().iloc[-1])
+            sma_50 = float(df['Close'].rolling(50).mean().iloc[-1]) if len(df) >= 50 else sma_20
+            rsi_slope_5 = 0.0
+            if ta:
+                rsi_series = ta.rsi(df['Close'], length=14)
+                if rsi_series is not None and len(rsi_series.dropna()) >= 6:
+                    rsi_slope_5 = float(rsi_series.dropna().iloc[-1] - rsi_series.dropna().iloc[-6])
+
+            features = {
+                "current_price": current_price,
+                "avg_vol_20": avg_vol_20,
+                "current_vol": current_vol,
+                "vol_shock": float(current_vol / avg_vol_20) if avg_vol_20 > 0 else 1.0,
+                "monthly_vol": monthly_vol,
+                "sma_20": sma_20,
+                "sma_50": sma_50,
+                "rsi": float(rsi),
+                "macd_hist": float(macd_hist),
+                "rsi_slope_5": rsi_slope_5,
+            }
+            info_proxy = {
+                "quoteType": info.get("quoteType", "EQUITY"),
+                "revenueGrowth": info.get("revenueGrowth", 0) or 0,
+                "profitGrowth": info.get("earningsGrowth", 0) or 0,
+                "returnOnEquity": info.get("returnOnEquity", 0) or 0,
+                "roce": info.get("returnOnAssets", 0) or 0,
+                "debtToEquity": info.get("debtToEquity", 0) or 0,
+                "beta": info.get("beta", 1.0) or 1.0,
+                "targetMeanPrice": info.get("targetMeanPrice", 0) or 0,
+                "trailingPE": info.get("trailingPE", 0) or 0,
+                "forwardPE": info.get("forwardPE", 0) or 0,
+                "pegRatio": info.get("pegRatio", 0) or 0,
+            }
+            projection = CoreStrategyPipeline().project_target(
+                current_price=current_price,
+                features=features,
+                info_proxy=info_proxy,
+                context=ScanRuntimeContext(
+                    region="IN" if str(info.get("symbol", "")).endswith(".NS") else "US",
+                    strategy_id="core",
+                    thresholds={},
+                    user_plan="pro",
+                    volatility_min=3.0,
+                    volatility_max=8.0,
+                ),
+                config=ALPHASEEKER_CORE,
+            )
+            upside_pct = float(projection.upside_pct)
+            val_score = float(projection.valuation_score)
             
             total_score = (fund_score * 0.4) + (mom_score * 0.3) + (val_score * 0.3)
             

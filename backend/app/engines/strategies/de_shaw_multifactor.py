@@ -69,3 +69,36 @@ class DEShawMultiFactorPipeline(BaseStrategyPipeline):
             f"Vol shock {features.get('vol_shock', 1):.2f}x | "
             "Trend + valuation balance"
         )
+
+    def project_target(self, current_price, features, info_proxy, context, config):
+        analyst_upside = self._analyst_upside(current_price, info_proxy)
+        momentum = self._momentum_factor(features)
+        quality = self._quality_factor(info_proxy)
+        valuation = self._valuation_factor(info_proxy, analyst_upside)
+        stability = self._stability_factor(features, info_proxy)
+        risk = self._risk_penalty(features, info_proxy)
+
+        multifactor = self._clamp(
+            (0.34 * momentum) + (0.3 * quality) + (0.24 * valuation) + (0.12 * stability),
+            0.0,
+            1.0,
+        )
+        model_upside = 0.035 + (0.06 * multifactor) + (0.03 * valuation) + (0.015 * stability) - (0.02 * risk)
+        blended_upside, source = self._blend_upside(model_upside, analyst_upside, analyst_weight=0.45)
+        final_upside = self._clamp(blended_upside, 0.035, 0.20)
+        signal_strength = self._clamp((0.4 * multifactor) + (0.32 * valuation) + (0.18 * quality) + (0.10 * stability), 0.0, 1.0)
+        return self._build_projection(
+            current_price=current_price,
+            upside_pct=final_upside,
+            source=source,
+            model_name="de_shaw_multifactor_target_model",
+            max_upside=0.20,
+            signal_strength=signal_strength,
+            components={
+                "multifactor": round(multifactor, 4),
+                "valuation": round(valuation, 4),
+                "quality": round(quality, 4),
+                "stability": round(stability, 4),
+                "risk": round(risk, 4),
+            },
+        )

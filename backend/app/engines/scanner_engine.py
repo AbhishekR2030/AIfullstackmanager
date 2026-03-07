@@ -423,19 +423,30 @@ class MarketScanner:
 
         return True, "Passed"
 
-    def _calculate_upside_score(self, df, info, region="IN", config: Optional[ScanConfig] = None):
+    def _calculate_upside_score(
+        self,
+        df,
+        info,
+        region="IN",
+        config: Optional[ScanConfig] = None,
+        pipeline=None,
+        context: Optional[ScanRuntimeContext] = None,
+        features: Optional[Dict[str, Any]] = None,
+    ):
         """
         Stage 4: Scoring Engine (0-100)
         """
         try:
             cfg = config or ALPHASEEKER_CORE
-            if ta:
+            feature_map = dict(features or {})
+            if ta and not feature_map:
                 rsi = self._safe_float(ta.rsi(df['Close'], length=14).iloc[-1], 50.0)
                 macd = ta.macd(df['Close'])
                 macd_hist = self._safe_float(macd['MACDh_12_26_9'].iloc[-1], 0.0)
+                feature_map.update({"rsi": rsi, "macd_hist": macd_hist})
             else:
-                rsi = 50.0
-                macd_hist = 0.0
+                rsi = self._safe_float(feature_map.get("rsi"), 50.0)
+                macd_hist = self._safe_float(feature_map.get("macd_hist"), 0.0)
             
             rsi_score = np.clip((rsi - 50) * 5, 0, 100)
             macd_score = 100 if macd_hist > 0 else 0
@@ -451,19 +462,24 @@ class MarketScanner:
                 roe_score = np.clip(roe * 400, 0, 100)
                 fund_score = (rev_score * 0.5) + (roe_score * 0.5)
 
-            current_price = self._safe_float(df['Close'].iloc[-1], 0.0)
-            target_price = info.get('targetMeanPrice', None)
-            
-            upside_pct = 0
-            if target_price and target_price > 0:
-                upside_pct = (target_price - current_price) / current_price
-            else:
-                peg = self._safe_float(info.get('pegRatio', 0), 0.0)
-                if peg and 0 < peg < 1.0: upside_pct = 0.20
-                elif peg and peg < 1.5: upside_pct = 0.10
-                else: upside_pct = 0.05
-            
-            val_score = np.clip(upside_pct * 500, 0, 100)
+            current_price = self._safe_float(feature_map.get("current_price"), self._safe_float(df['Close'].iloc[-1], 0.0))
+            runtime_context = context or ScanRuntimeContext(
+                region=(region or "IN").strip().upper(),
+                strategy_id=getattr(pipeline, "strategy_id", "core"),
+                thresholds={},
+                user_plan="pro",
+                volatility_min=3.0,
+                volatility_max=8.0,
+            )
+            projector = getattr(pipeline, "project_target", None)
+            projection = (
+                projector(current_price, feature_map, info, runtime_context, cfg)
+                if callable(projector)
+                else self.strategy_registry.get("core").project_target(current_price, feature_map, info, runtime_context, cfg)
+            )
+
+            upside_pct = self._safe_float(getattr(projection, "upside_pct", 0.0), 0.0)
+            val_score = self._safe_float(getattr(projection, "valuation_score", np.clip(upside_pct * 500, 0, 100)), 0.0)
             composite_score = self._composite_upside_score(
                 {
                     "rsi": rsi,
@@ -480,14 +496,20 @@ class MarketScanner:
             return {
                 "total_score": round(total_score, 2),
                 "upside_pct": round(upside_pct * 100, 1),
-                "momentum_score": round(mom_score, 1)
+                "momentum_score": round(mom_score, 1),
+                "target_price": round(self._safe_float(getattr(projection, "target_price", current_price), current_price), 2),
+                "target_source": getattr(projection, "source", "strategy_model"),
+                "target_model": getattr(projection, "model_name", f"{getattr(pipeline, 'strategy_id', 'core')}_target_model"),
             }
             
         except:
             return {
                 "total_score": 50.0,
                 "upside_pct": 0.0,
-                "momentum_score": 50.0
+                "momentum_score": 50.0,
+                "target_price": 0.0,
+                "target_source": "unavailable",
+                "target_model": "unavailable",
             }
 
     def get_info_threaded(self, ticker):
@@ -758,8 +780,12 @@ class MarketScanner:
                     "debtToEquity": debt_to_equity,
                     "sector": p_data.get("sector", "Unknown"),
                     "beta": safe_float(p_data.get("beta"), 1.0),
-                    "targetMeanPrice": candidate.get("price", 0) * 1.2,
+                    "targetMeanPrice": safe_float(
+                        p_data.get("target_mean_price", p_data.get("targetMeanPrice", 0.0)),
+                        0.0,
+                    ),
                     "trailingPE": trailing_pe,
+                    "forwardPE": safe_float(p_data.get("forward_pe", p_data.get("forwardPE", 0.0)), 0.0),
                     "pegRatio": safe_float(p_data.get("peg_ratio", p_data.get("pegRatio", 0.0)), 0.0),
                 }
 
@@ -775,7 +801,15 @@ class MarketScanner:
                     moat_failed = True
                     failed_checks.append("EconomicMoat: ROE-WACC < 5%")
 
-                score_data = self._calculate_upside_score(candidate.get("df"), info_proxy, runtime_context.region, config=config)
+                score_data = self._calculate_upside_score(
+                    candidate.get("df"),
+                    info_proxy,
+                    runtime_context.region,
+                    config=config,
+                    pipeline=pipeline,
+                    context=runtime_context,
+                    features=candidate.get("features", {}),
+                )
                 adjusted_score = pipeline.adjust_score(
                     score_data.get("total_score", 50.0),
                     candidate.get("features", {}),
@@ -828,6 +862,9 @@ class MarketScanner:
                     "price": round(self._safe_float(candidate.get("price", 0.0), 0.0), 2),
                     "score": round(self._safe_float(adjusted_score, 0.0), 2),
                     "upside_potential": self._safe_float(score_data.get("upside_pct", 0), 0.0),
+                    "target_price": self._safe_float(score_data.get("target_price", 0), 0.0),
+                    "target_source": score_data.get("target_source", "strategy_model"),
+                    "target_model": score_data.get("target_model", f"{pipeline.strategy_id}_target_model"),
                     "momentum_score": self._safe_float(score_data.get("momentum_score", 50), 50.0),
                     "rsi": round(self._safe_float(candidate.get("rsi", 50.0), 50.0), 2),
                     "vol_shock": round(self._safe_float(candidate.get("vol_shock", 1.0), 1.0), 2),

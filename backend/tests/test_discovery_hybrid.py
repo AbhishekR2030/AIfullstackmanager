@@ -1,14 +1,23 @@
 from types import SimpleNamespace
 
-import pandas as pd
 import json
+import math
+import pandas as pd
 
 from app.engines.scanner_engine import MarketScanner
+from app.engines.strategy_base import ScanRuntimeContext
+from app.engines.strategies.core import CoreStrategyPipeline
 
 
 def _sample_ohlcv(rows: int = 90) -> pd.DataFrame:
     closes = [100 + (index * 0.8) for index in range(rows)]
     volumes = [1_200_000 + (index * 1200) for index in range(rows)]
+    return pd.DataFrame({"Close": closes, "Volume": volumes})
+
+
+def _scan_ready_ohlcv(rows: int = 90) -> pd.DataFrame:
+    closes = [100 * (1 + 0.0025 * index + 0.06 * math.sin(index / 4)) for index in range(rows)]
+    volumes = [1_200_000] * (rows - 1) + [2_500_000]
     return pd.DataFrame({"Close": closes, "Volume": volumes})
 
 
@@ -298,3 +307,141 @@ def test_scan_result_serialization_handles_nan_fundamentals(monkeypatch):
 
     # Mirrors FastAPI's strict JSON serialization behavior.
     json.dumps(results, allow_nan=False)
+
+
+def test_strategy_specific_target_models_diverge_without_analyst_target():
+    scanner = MarketScanner()
+    features = {
+        "current_price": 100.0,
+        "avg_vol_20": 1_500_000.0,
+        "current_vol": 3_600_000.0,
+        "vol_shock": 2.4,
+        "monthly_vol": 5.6,
+        "sma_20": 96.5,
+        "sma_50": 93.2,
+        "rsi": 58.0,
+        "macd_hist": 1.15,
+        "rsi_slope_5": 3.2,
+    }
+    info_proxy = {
+        "quoteType": "EQUITY",
+        "revenueGrowth": 0.17,
+        "profitGrowth": 0.13,
+        "returnOnEquity": 0.24,
+        "roce": 0.22,
+        "debtToEquity": 28.0,
+        "beta": 1.04,
+        "targetMeanPrice": 0.0,
+        "trailingPE": 20.0,
+        "forwardPE": 18.0,
+        "pegRatio": 1.1,
+    }
+
+    projections = {}
+    for strategy_id in [
+        "core",
+        "citadel_momentum",
+        "jane_street_stat",
+        "millennium_quality",
+        "de_shaw_multifactor",
+    ]:
+        pipeline = scanner.strategy_registry.get(strategy_id)
+        projection = pipeline.project_target(
+            current_price=100.0,
+            features=features,
+            info_proxy=info_proxy,
+            context=ScanRuntimeContext(
+                region="IN",
+                strategy_id=strategy_id,
+                thresholds={},
+                user_plan="pro",
+                volatility_min=3.0,
+                volatility_max=8.0,
+            ),
+            config=scanner._resolve_scan_config(strategy_id),
+        )
+        projections[strategy_id] = round(projection.upside_pct, 4)
+
+    assert projections["citadel_momentum"] > projections["jane_street_stat"]
+    assert projections["millennium_quality"] != projections["de_shaw_multifactor"]
+    assert projections["core"] != 0.2
+    assert len(set(projections.values())) == len(projections)
+
+
+def test_scan_market_does_not_inject_synthetic_twenty_percent_target(monkeypatch):
+    scanner = MarketScanner()
+    ohlcv = _scan_ready_ohlcv()
+
+    class ScanReadyCorePipeline(CoreStrategyPipeline):
+        def compute_technical_features(self, df, context):
+            return {
+                "current_price": float(df["Close"].iloc[-1]),
+                "avg_vol_20": float(df["Volume"].rolling(20).mean().iloc[-1]),
+                "current_vol": float(df["Volume"].iloc[-1]),
+                "vol_shock": 1.98,
+                "monthly_vol": 4.8,
+                "sma_20": float(df["Close"].rolling(20).mean().iloc[-1]),
+                "sma_50": float(df["Close"].rolling(50).mean().iloc[-1]),
+                "rsi": 58.0,
+                "macd_hist": 0.85,
+                "rsi_slope_5": 1.4,
+            }
+
+        def technical_filter(self, features, context, config):
+            return True
+
+    monkeypatch.setattr(scanner.data_platform, "load_universe", lambda _region: ["INFY.NS"])
+    monkeypatch.setattr(scanner.data_platform, "fetch_ohlcv", lambda _tickers, period="3mo": ohlcv)
+    monkeypatch.setattr(scanner.strategy_registry, "normalize", lambda _strategy: "core")
+    monkeypatch.setattr(scanner.strategy_registry, "get", lambda _strategy: ScanReadyCorePipeline())
+    monkeypatch.setattr(
+        scanner.risk_guard,
+        "evaluate_liquidity",
+        lambda _features, _config, _region: (True, "ok", {"turnover_cr": 18.0, "daily_turnover_inr": 180000000.0}),
+    )
+    monkeypatch.setattr(scanner.execution_simulator, "select_fundamental_candidates", lambda candidates, limit=30: candidates)
+    monkeypatch.setattr(
+        scanner.execution_simulator,
+        "estimate_execution",
+        lambda _features, region: {"slippage_bps": 7.5, "fill_probability": 0.84, "execution_quality": 93.0, "region": region},
+    )
+    monkeypatch.setattr(scanner.portfolio_accounting, "attach_portfolio_context", lambda candidates, holdings=None: candidates)
+    monkeypatch.setattr(
+        scanner.monitoring,
+        "start_scan",
+        lambda strategy_id, region: SimpleNamespace(
+            strategy_id=strategy_id,
+            region=region,
+            counters={},
+            notes=[],
+            increment=lambda key, value=1: None,
+            add_note=lambda note: None,
+        ),
+    )
+    monkeypatch.setattr(scanner.monitoring, "finalize_scan", lambda telemetry: {"strategy_id": telemetry.strategy_id})
+    monkeypatch.setattr(
+        scanner,
+        "_fetch_yahoo_fundamentals",
+        lambda _ticker, _region: {
+            "source": "YahooFinance",
+            "revenue_growth_yoy": 0.15,
+            "return_on_equity": 0.21,
+            "return_on_capital_employed": 0.19,
+            "profit_growth_yoy": 0.14,
+            "debt_to_equity": 24.0,
+            "sector": "Technology",
+            "beta": 1.05,
+            "trailing_pe": 22.0,
+            "forward_pe": 19.0,
+            "peg_ratio": 1.2,
+            "target_mean_price": 0.0,
+        },
+    )
+
+    results = scanner.scan_market(region="IN", strategy="core", thresholds={}, user_plan="pro")
+
+    assert len(results) == 1
+    candidate = results[0]
+    assert candidate["target_source"] == "strategy_model"
+    assert candidate["upside_potential"] != 20.0
+    assert candidate["target_price"] > candidate["price"]
