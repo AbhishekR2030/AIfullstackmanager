@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Apple, ArrowRight, LockKeyhole, Mail } from 'lucide-react';
 import { Capacitor, registerPlugin } from '@capacitor/core';
@@ -81,12 +81,6 @@ const Login = () => {
     const [providerLoading, setProviderLoading] = useState('');
     const navigate = useNavigate();
     const isNative = Capacitor.isNativePlatform();
-
-    const heroMetrics = useMemo(() => ([
-        { label: 'Discovery', value: '6 strategy engines' },
-        { label: 'Portfolio sync', value: 'HDFC + Zerodha' },
-        { label: 'Research', value: 'AI Thesis + Portfolio Rebalance' },
-    ]), []);
 
     useEffect(() => {
         document.body.classList.add('login-route');
@@ -301,20 +295,13 @@ const Login = () => {
         <div className="login-shell">
             <div className="login-surface">
                 <section className="login-hero-panel">
-                    <span className="hero-pill">Native iOS quant terminal</span>
                     <h1>AlphaSeeker</h1>
-                    <p>
-                        Screen Indian equities with institutional strategy presets, sync broker holdings,
-                        and review portfolio replacement ideas in one workflow.
-                    </p>
-
-                    <div className="hero-metric-grid">
-                        {heroMetrics.map((item) => (
-                            <article className="hero-metric-card" key={item.label}>
-                                <span>{item.label}</span>
-                                <strong>{item.value}</strong>
-                            </article>
-                        ))}
+                    <div className="hero-positioning">
+                        <p className="hero-statement">Invest like a hedge fund.</p>
+                        <p>
+                            Sync your portfolio and discover institutional strategies that reveal what to buy,
+                            sell, and rebalance. All in your native Quant terminal.
+                        </p>
                     </div>
                 </section>
 

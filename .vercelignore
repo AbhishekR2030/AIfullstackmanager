@@ -1,0 +1,13 @@
+*
+!.vercel/
+!.vercel/project.json
+!frontend/
+!frontend/**
+frontend/node_modules/
+frontend/dist/
+frontend/ios/
+frontend/android/
+frontend/.vercel/
+frontend/.env
+frontend/.env.local
+frontend/.env.development
