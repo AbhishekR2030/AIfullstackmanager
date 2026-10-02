@@ -1,0 +1,8 @@
+{
+  "name": "alphaseeker-vercel-entry",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm --prefix frontend run build"
+  }
+}

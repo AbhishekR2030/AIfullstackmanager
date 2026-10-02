@@ -1,6 +1,10 @@
 *
 !.vercel/
 !.vercel/project.json
+!package.json
+!vercel.json
+!api/
+!api/holdings-phone.js
 !frontend/
 !frontend/**
 frontend/node_modules/
@@ -8,6 +12,5 @@ frontend/dist/
 frontend/ios/
 frontend/android/
 frontend/.vercel/
-frontend/.env
-frontend/.env.local
-frontend/.env.development
+frontend/.env*
+frontend/**/.env*
