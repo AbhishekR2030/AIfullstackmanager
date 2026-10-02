@@ -35,7 +35,7 @@ test('server login and verified snapshot satisfy actual phone validators', async
   assert.equal(snapshot.holdings[0].investment_value, null);
   assert.equal(snapshot.holdings[0].security_id, '42');
   assert.deepEqual(calls.map(({ url, options }) => [options.method, url.pathname]), [
-    ['POST', '/oapi/v1/access-token'], ['POST', '/oapi/v3/user/profile'], ['GET', '/oapi/v1/portfolio/holdings'],
+    ['POST', '/oapi/v1/access-token'], ['GET', '/oapi/v3/user/profile'], ['GET', '/oapi/v1/portfolio/holdings'],
   ]);
   assert.equal(calls[1].options.headers.Authorization, 'synthetic-broker-token');
   assert.equal(calls[2].options.headers.Authorization, 'synthetic-broker-token');

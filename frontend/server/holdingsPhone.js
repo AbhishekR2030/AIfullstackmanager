@@ -178,7 +178,7 @@ async function withSignal(promise, signal, stage) {
 
 async function providerJson(fetchImpl, method, endpoint, config, { accessToken, requestToken, overallSignal, requestTimeoutMs }) {
   const stage = endpoint === ENDPOINTS.auth ? 'token_exchange' : endpoint === ENDPOINTS.profile ? 'profile' : 'holdings';
-  const allowed = (method === 'POST' && [ENDPOINTS.auth, ENDPOINTS.profile].includes(endpoint)) || (method === 'GET' && endpoint === ENDPOINTS.holdings);
+  const allowed = (method === 'POST' && endpoint === ENDPOINTS.auth) || (method === 'GET' && [ENDPOINTS.profile, ENDPOINTS.holdings].includes(endpoint));
   if (!allowed) throw new FlowError('provider_failed', 502);
   const url = new URL(endpoint);
   url.searchParams.set('api_key', config.key);
@@ -269,7 +269,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       const config = configFrom(env);
       if (req.method === 'GET') {
         if (query.length > 1 || (query.length === 1 && (query[0][0] !== 'action' || query[0][1] !== 'health'))) throw new FlowError('invalid_request');
-        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1 });
+        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1, profile_method: 'GET' });
         return;
       }
       if (req.method !== 'POST') {
@@ -311,7 +311,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
         if (accessToken == null || accessToken === '') throw new FlowError('provider_failed', 502, { stage: 'token_exchange', reason: 'token_missing' });
         if (!validText(accessToken, 8192)) throw new FlowError('provider_failed', 502, { stage: 'token_exchange', reason: 'response_shape' });
         if (session.exp <= Math.floor(now() / 1000)) throw new FlowError('session_expired', 410);
-        const profile = await providerJson(fetchImpl, 'POST', ENDPOINTS.profile, config, { accessToken, overallSignal, requestTimeoutMs });
+        const profile = await providerJson(fetchImpl, 'GET', ENDPOINTS.profile, config, { accessToken, overallSignal, requestTimeoutMs });
         if (profile.status !== 'success' || !Array.isArray(profile.data) || profile.data.length !== 1 || !profile.data[0] || typeof profile.data[0] !== 'object') throw new FlowError('provider_failed', 502, { stage: 'profile', reason: 'response_shape' });
         const userId = profile.data[0].user_id;
         if (!(typeof userId === 'string' || (typeof userId === 'number' && Number.isSafeInteger(userId)))

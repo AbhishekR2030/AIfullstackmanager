@@ -44,7 +44,7 @@ function fakeProvider({ user = 'DEMOUSER', holdings, responseOverrides = [] } = 
 
 test('health reports configured boolean and never exposes server values', async () => {
   const result = await invoke(create(), { method: 'GET' });
-  assert.deepEqual(result.body, { version: 'holdings-phone-v1', configured: true, diagnostics_version: 1 });
+  assert.deepEqual(result.body, { version: 'holdings-phone-v1', configured: true, diagnostics_version: 1, profile_method: 'GET' });
   assert.equal(result.headers['cache-control'], 'no-store, private');
   assert.equal(result.headers['referrer-policy'], 'no-referrer');
   for (const value of Object.values(ENV)) assert.ok(!result.raw.includes(value));
@@ -140,7 +140,7 @@ test('clear deletes only browser cookie and makes no broker request', async () =
   assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
 });
 
-test('verified snapshot calls only auth POST, profile POST and holdings GET', async () => {
+test('verified snapshot calls only auth POST, profile GET and holdings GET', async () => {
   const fake = fakeProvider();
   const handler = create(fake.fetchImpl);
   const cookie = await started(handler);
@@ -153,7 +153,7 @@ test('verified snapshot calls only auth POST, profile POST and holdings GET', as
   assert.equal(result.body.holdings_count, 1);
   assert.deepEqual(result.body.holdings[0], { isin: 'DEMO00000001', quantity: 3, company_name: 'Synthetic Company', security_id: '123', exchange: 'NSE', average_price: 10.5, investment_value: null, close_price: 12 });
   assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
-  assert.deepEqual(fake.calls.map(({ url, options }) => [options.method, new URL(url).origin + new URL(url).pathname]), [['POST', ENDPOINTS.auth], ['POST', ENDPOINTS.profile], ['GET', ENDPOINTS.holdings]]);
+  assert.deepEqual(fake.calls.map(({ url, options }) => [options.method, new URL(url).origin + new URL(url).pathname]), [['POST', ENDPOINTS.auth], ['GET', ENDPOINTS.profile], ['GET', ENDPOINTS.holdings]]);
   for (const { options } of fake.calls) {
     assert.equal(options.redirect, 'error');
     assert.equal(options.cache, 'no-store');
@@ -236,13 +236,44 @@ for (const [label, response] of [
   });
 }
 
-test('unsupported profile POST fails closed without fallback or holdings', async () => {
+test('unsupported profile GET fails closed without fallback or holdings', async () => {
   const fake = fakeProvider({ responseOverrides: [undefined, new Response('unused', { status: 405 })] });
   const handler = create(fake.fetchImpl);
   const cookie = await started(handler);
   const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
   assert.equal(result.status, 502);
   assert.equal(fake.calls.length, 2);
+});
+
+test('profile route regression uses documented GET with identity verified before holdings', async () => {
+  const fake = fakeProvider();
+  const routeCalls = [];
+  const handler = create(async (url, options) => {
+    const route = new URL(url);
+    routeCalls.push([options.method, route.origin + route.pathname]);
+    if (route.origin + route.pathname === ENDPOINTS.profile && options.method === 'POST') return new Response('unused', { status: 404 });
+    return fake.fetchImpl(url, options);
+  });
+  const cookie = await started(handler);
+  const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.account_verified, true);
+  assert.deepEqual(routeCalls, [['POST', ENDPOINTS.auth], ['GET', ENDPOINTS.profile], ['GET', ENDPOINTS.holdings]]);
+  const profileRequest = fake.calls[1];
+  assert.equal(new URL(profileRequest.url).searchParams.get('api_key'), ENV.HDFC_API_KEY);
+  assert.equal(profileRequest.options.headers.Authorization, 'synthetic-access-token');
+  assert.ok(profileRequest.options.headers['User-Agent']);
+  assert.equal(profileRequest.options.body, undefined);
+});
+
+test('profile GET HTTP404 retains its reference and never retries or reads holdings', async () => {
+  const fake = fakeProvider({ responseOverrides: [undefined, new Response(unsafeBody, { status: 404 })] });
+  const handler = create(fake.fetchImpl);
+  const cookie = await started(handler);
+  const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
+  assert.equal(result.status, 502);
+  assert.deepEqual(result.body.error.diagnostic, { stage: 'profile', reason: 'http_status', http_status: 404 });
+  assert.deepEqual(fake.calls.map(call => [call.options.method, new URL(call.url).origin + new URL(call.url).pathname]), [['POST', ENDPOINTS.auth], ['GET', ENDPOINTS.profile]]);
 });
 
 test('session expiry while checking profile prevents holdings call', async () => {
@@ -340,7 +371,7 @@ for (const fixture of diagnosticCases) {
     if (fixture.http_status) expected.http_status = fixture.http_status;
     assert.deepEqual(result.body.error.diagnostic, expected);
     assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
-    assert.deepEqual(fake.calls.map(call => [call.options.method, new URL(call.url).origin + new URL(call.url).pathname]), [['POST', ENDPOINTS.auth], ['POST', ENDPOINTS.profile], ['GET', ENDPOINTS.holdings]].slice(0, fixture.index + 1));
+    assert.deepEqual(fake.calls.map(call => [call.options.method, new URL(call.url).origin + new URL(call.url).pathname]), [['POST', ENDPOINTS.auth], ['GET', ENDPOINTS.profile], ['GET', ENDPOINTS.holdings]].slice(0, fixture.index + 1));
     for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
   });
 }
