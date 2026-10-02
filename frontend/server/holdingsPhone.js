@@ -3,103 +3,37 @@ import { Buffer } from 'node:buffer';
 import process from 'node:process';
 
 export const ORIGIN = 'https://alphaseeker.vercel.app';
-export const COOKIE_NAME = '__Host-hdfc_holdings_phone_v1';
-export const VERSION = 'holdings-phone-v1';
+export const COOKIE_NAME = '__Host-hdfc_holdings_phone_v2';
+export const VERSION = 'holdings-phone-v2';
 export const TTL_SECONDS = 600;
 export const MAX_INPUT_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-const MAX_VALIDATION_BYTES = 16 * 1024;
-const MAX_VALIDATION_ISSUES = 8;
-const VALIDATION_READ_TIMEOUT_MS = 2000;
 export const ENDPOINTS = Object.freeze({
   login: 'https://developer.hdfcsec.com/oapi/v1/login',
   auth: 'https://developer.hdfcsec.com/oapi/v1/access-token',
-  profile: 'https://developer.hdfcsec.com/oapi/v3/user/profile',
   holdings: 'https://developer.hdfcsec.com/oapi/v1/portfolio/holdings',
 });
 const USER_AGENT = 'AlphaSeeker-Holdings-Phone/1.0';
-const AAD = Buffer.from(`${COOKIE_NAME}|v1|${ORIGIN}`, 'utf8');
+const AAD = Buffer.from(`${COOKIE_NAME}|v2|${ORIGIN}`, 'utf8');
 const MESSAGES = Object.freeze({
   invalid_request: 'The request is invalid. Start again.',
   method_not_allowed: 'This request method is not supported.',
   origin_not_allowed: 'The request origin is not permitted.',
   not_configured: 'Holdings sign-in is not configured yet.',
-  account_mismatch: 'The HDFC account does not match the configured owner.',
   session_invalid: 'No valid sign-in session. Start again in this browser.',
   session_expired: 'The sign-in session expired. Start again.',
-  provider_failed: 'HDFC could not complete a verified holdings snapshot. Start again later.',
+  provider_failed: 'HDFC could not complete a holdings snapshot. Start again later.',
 });
-const DIAGNOSTIC_STAGES = new Set(['request', 'session', 'token_exchange', 'profile', 'holdings']);
-const DIAGNOSTIC_REASONS = new Set(['invalid', 'origin', 'configuration', 'session', 'expired', 'owner_mismatch', 'http_status', 'transport', 'timeout', 'response_size', 'json', 'response_shape', 'token_missing', 'identity_shape', 'snapshot_shape']);
-const VALIDATION_LOCATIONS = new Set(['header', 'query', 'body', 'path']);
-const VALIDATION_FIELDS = new Set(['api_key', 'authorization', 'user_agent', 'content_type', 'access_token', 'client_id', 'client_code', 'user_id', 'request_token', 'api_secret', 'token', 'other']);
-const VALIDATION_KINDS = new Set(['missing', 'invalid']);
-const MISSING_VALIDATION_TYPES = new Set(['missing', 'value_error.missing']);
-const INVALID_VALIDATION_TYPES = new Set(['string_type', 'string_unicode', 'string_too_short', 'string_too_long', 'string_pattern_mismatch', 'int_type', 'int_parsing', 'int_from_float', 'float_type', 'float_parsing', 'finite_number', 'bool_type', 'bool_parsing', 'list_type', 'dict_type', 'literal_error', 'enum', 'extra_forbidden', 'value_error', 'type_error.str', 'type_error.integer', 'type_error.float', 'type_error.bool', 'value_error.str.regex', 'value_error.any_str.min_length', 'value_error.any_str.max_length']);
-const HEADER_VALIDATION_FIELDS = new Map([['api_key', 'api_key'], ['authorization', 'authorization'], ['user-agent', 'user_agent'], ['user_agent', 'user_agent'], ['content-type', 'content_type'], ['content_type', 'content_type'], ['access_token', 'access_token'], ['client_id', 'client_id'], ['client_code', 'client_code'], ['user_id', 'user_id'], ['request_token', 'request_token'], ['api_secret', 'api_secret'], ['token', 'token']]);
+const DIAGNOSTIC_STAGES = new Set(['request', 'session', 'token_exchange', 'holdings']);
+const DIAGNOSTIC_REASONS = new Set(['invalid', 'origin', 'configuration', 'session', 'expired', 'http_status', 'transport', 'timeout', 'response_size', 'json', 'response_shape', 'token_missing', 'snapshot_shape']);
 const DEFAULT_DIAGNOSTICS = Object.freeze({
   invalid_request: { stage: 'request', reason: 'invalid' },
   method_not_allowed: { stage: 'request', reason: 'invalid' },
   origin_not_allowed: { stage: 'request', reason: 'origin' },
   not_configured: { stage: 'request', reason: 'configuration' },
-  account_mismatch: { stage: 'profile', reason: 'owner_mismatch' },
   session_invalid: { stage: 'session', reason: 'session' },
   session_expired: { stage: 'session', reason: 'expired' },
 });
-
-function ownValue(object, key) {
-  if (!object || typeof object !== 'object') return undefined;
-  return Object.getOwnPropertyDescriptor(object, key)?.value;
-}
-
-function sanitizedValidation(issues) {
-  if (!Array.isArray(issues)) return [];
-  const result = [];
-  const seen = new Set();
-  for (let index = 0; index < Math.min(issues.length, 32); index += 1) {
-    const issue = ownValue(issues, index);
-    if (!issue || typeof issue !== 'object' || Array.isArray(issue)) continue;
-    const location = ownValue(issue, 'location');
-    const field = ownValue(issue, 'field');
-    const kind = ownValue(issue, 'kind');
-    if (!VALIDATION_LOCATIONS.has(location) || !VALIDATION_FIELDS.has(field) || !VALIDATION_KINDS.has(kind)) continue;
-    const identity = `${location}:${field}:${kind}`;
-    if (seen.has(identity)) continue;
-    seen.add(identity);
-    result.push({ location, field, kind });
-    if (result.length === MAX_VALIDATION_ISSUES) break;
-  }
-  return result;
-}
-
-function validationIssues(payload) {
-  const detail = ownValue(payload, 'detail');
-  if (!Array.isArray(detail)) return [];
-  const issues = [];
-  for (let index = 0; index < Math.min(detail.length, 32); index += 1) {
-    const item = ownValue(detail, index);
-    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-    const type = ownValue(item, 'type');
-    const kind = MISSING_VALIDATION_TYPES.has(type) ? 'missing' : INVALID_VALIDATION_TYPES.has(type) ? 'invalid' : undefined;
-    const loc = ownValue(item, 'loc');
-    if (!kind || !Array.isArray(loc) || loc.length < 1 || loc.length > 8) continue;
-    let flat = true;
-    for (let part = 0; part < loc.length; part += 1) {
-      const value = ownValue(loc, part);
-      if (typeof value !== 'string' && !(Number.isSafeInteger(value) && value >= 0)) flat = false;
-    }
-    if (!flat) continue;
-    const location = ownValue(loc, 0);
-    if (!VALIDATION_LOCATIONS.has(location)) continue;
-    const name = ownValue(loc, 1);
-    let field = 'other';
-    if (loc.length === 2 && typeof name === 'string') {
-      field = location === 'header' ? HEADER_VALIDATION_FIELDS.get(name.toLowerCase()) || 'other' : VALIDATION_FIELDS.has(name) ? name : 'other';
-    }
-    issues.push({ location, field, kind });
-  }
-  return sanitizedValidation(issues);
-}
 
 export class FlowError extends Error {
   constructor(code, status = 400, diagnostic = DEFAULT_DIAGNOSTICS[code]) {
@@ -112,10 +46,7 @@ export class FlowError extends Error {
     };
     if (this.diagnostic.reason === 'http_status' && Number.isInteger(diagnostic?.http_status)
       && diagnostic.http_status >= 100 && diagnostic.http_status <= 599) this.diagnostic.http_status = diagnostic.http_status;
-    if (this.diagnostic.stage === 'profile' && this.diagnostic.reason === 'http_status' && this.diagnostic.http_status === 422) {
-      const validation = sanitizedValidation(ownValue(diagnostic, 'validation'));
-      if (validation.length > 0) this.diagnostic.validation = validation;
-    }
+
   }
 }
 
@@ -128,43 +59,33 @@ function validText(value, maximum) {
   return true;
 }
 
-function normalizeIdentity(value) {
-  if (!validText(value, 80) || !value.trim()) throw new FlowError('invalid_request');
-  return value.trim().toUpperCase();
-}
-
 function configFrom(env) {
   const key = env.HDFC_API_KEY;
   const secret = env.HDFC_API_SECRET;
-  const owner = env.HDFC_ALLOWED_USER_ID;
-  if (!validText(key, 8192) || !key.trim() || !validText(secret, 8192) || !secret.trim() || !validText(owner, 80) || !owner.trim()) return null;
-  return { key, secret, owner: normalizeIdentity(owner) };
+  if (!validText(key, 8192) || !key.trim() || !validText(secret, 8192) || !secret.trim()) return null;
+  return { key, secret };
 }
 
 function deriveKey(secret, label) {
-  return Buffer.from(hkdfSync('sha256', Buffer.from(secret, 'utf8'), Buffer.from(ORIGIN, 'utf8'), Buffer.from(`hdfc-holdings-phone-v1:${label}`, 'utf8'), 32));
+  return Buffer.from(hkdfSync('sha256', Buffer.from(secret, 'utf8'), Buffer.from(ORIGIN, 'utf8'), Buffer.from(`hdfc-holdings-phone-v2:${label}`, 'utf8'), 32));
 }
 
-function identityDigest(value, config) {
-  return createHmac('sha256', deriveKey(config.secret, 'account-identity')).update(normalizeIdentity(value), 'utf8').digest();
-}
-
-function matchesOwner(value, config) {
-  return timingSafeEqual(identityDigest(value, config), identityDigest(config.owner, config));
+function applicationDigest(config) {
+  return createHmac('sha256', deriveKey(config.secret, 'application-binding')).update(config.key, 'utf8').digest();
 }
 
 export function sealSession(config, nowMilliseconds) {
   const issued = Math.floor(nowMilliseconds / 1000);
-  const payload = { v: 1, owner: identityDigest(config.owner, config).toString('hex'), nonce: randomBytes(16).toString('hex'), iat: issued, exp: issued + TTL_SECONDS };
+  const payload = { v: 2, app: applicationDigest(config).toString('hex'), nonce: randomBytes(16).toString('hex'), iat: issued, exp: issued + TTL_SECONDS };
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', deriveKey(config.secret, 'session-cookie'), iv);
   cipher.setAAD(AAD);
   const encrypted = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
-  return { cookie: `v1.${Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString('base64url')}`, expiresAt: new Date(payload.exp * 1000).toISOString() };
+  return { cookie: `v2.${Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString('base64url')}`, expiresAt: new Date(payload.exp * 1000).toISOString() };
 }
 
 export function openSession(value, config, nowMilliseconds) {
-  if (!validText(value, 1024) || !/^v1\.[A-Za-z0-9_-]+$/u.test(value)) throw new FlowError('session_invalid', 401);
+  if (!validText(value, 1024) || !/^v2\.[A-Za-z0-9_-]+$/u.test(value)) throw new FlowError('session_invalid', 401);
   let payload;
   try {
     const packed = Buffer.from(value.slice(3), 'base64url');
@@ -178,11 +99,11 @@ export function openSession(value, config, nowMilliseconds) {
   }
   const now = Math.floor(nowMilliseconds / 1000);
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 5
-    || payload.v !== 1 || !/^[a-f0-9]{64}$/u.test(payload.owner || '') || !/^[a-f0-9]{32}$/u.test(payload.nonce || '')
+    || payload.v !== 2 || !/^[a-f0-9]{64}$/u.test(payload.app || '') || !/^[a-f0-9]{32}$/u.test(payload.nonce || '')
     || !Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp)
     || payload.iat < 0 || payload.iat > now || payload.exp - payload.iat !== TTL_SECONDS) throw new FlowError('session_invalid', 401);
   if (payload.exp <= now) throw new FlowError('session_expired', 410);
-  if (!timingSafeEqual(Buffer.from(payload.owner, 'hex'), identityDigest(config.owner, config))) throw new FlowError('session_invalid', 401);
+  if (!timingSafeEqual(Buffer.from(payload.app, 'hex'), applicationDigest(config))) throw new FlowError('session_invalid', 401);
   return payload;
 }
 
@@ -225,7 +146,7 @@ export function normalizeHoldings(payload, nowMilliseconds) {
     for (const field of ['average_price', 'investment_value', 'close_price']) normalized[field] = numeric(row[field]);
     return normalized;
   });
-  const snapshot = { snapshot_version: 1, source: 'HDFC InvestRight', as_of_utc: new Date(nowMilliseconds).toISOString(), account_verified: true, holdings_count: holdings.length, holdings };
+  const snapshot = { snapshot_version: 2, source: 'HDFC InvestRight', as_of_utc: new Date(nowMilliseconds).toISOString(), account_authenticated: true, identity_verification: 'broker_authentication', holdings_count: holdings.length, holdings };
   if (Buffer.byteLength(JSON.stringify(snapshot), 'utf8') > MAX_RESPONSE_BYTES) throw new FlowError('provider_failed', 502, { stage: 'holdings', reason: 'response_size' });
   return snapshot;
 }
@@ -243,34 +164,9 @@ async function withSignal(promise, signal, stage) {
   }
 }
 
-async function readProfileValidation(response, requestSignal) {
-  let reader;
-  try {
-    if (!response.body) return [];
-    const signal = AbortSignal.any([requestSignal, AbortSignal.timeout(VALIDATION_READ_TIMEOUT_MS)]);
-    reader = response.body.getReader();
-    const chunks = [];
-    let total = 0;
-    while (true) {
-      const chunk = await withSignal(reader.read(), signal, 'profile');
-      if (chunk.done) break;
-      total += chunk.value.byteLength;
-      if (total > MAX_VALIDATION_BYTES) return [];
-      chunks.push(Buffer.from(chunk.value));
-    }
-    return validationIssues(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total))));
-  } catch {
-    return [];
-  } finally {
-    if (reader) {
-      try { void reader.cancel().catch(() => {}); } catch { /* Optional diagnostics never delay the original error. */ }
-    }
-  }
-}
-
 async function providerJson(fetchImpl, method, endpoint, config, { accessToken, requestToken, overallSignal, requestTimeoutMs }) {
-  const stage = endpoint === ENDPOINTS.auth ? 'token_exchange' : endpoint === ENDPOINTS.profile ? 'profile' : 'holdings';
-  const allowed = (method === 'POST' && endpoint === ENDPOINTS.auth) || (method === 'GET' && [ENDPOINTS.profile, ENDPOINTS.holdings].includes(endpoint));
+  const stage = endpoint === ENDPOINTS.auth ? 'token_exchange' : 'holdings';
+  const allowed = (method === 'POST' && endpoint === ENDPOINTS.auth) || (method === 'GET' && endpoint === ENDPOINTS.holdings);
   if (!allowed) throw new FlowError('provider_failed', 502);
   const url = new URL(endpoint);
   url.searchParams.set('api_key', config.key);
@@ -278,7 +174,8 @@ async function providerJson(fetchImpl, method, endpoint, config, { accessToken, 
   const options = { method, headers, redirect: 'error', cache: 'no-store' };
   if (accessToken !== undefined) {
     if (!validText(accessToken, 8192)) throw new FlowError('provider_failed', 502, { stage, reason: 'response_shape' });
-    headers.Authorization = accessToken;
+    headers.Authorization = `Bearer ${accessToken}`;
+    headers['x-api-key'] = config.key;
   }
   if (endpoint === ENDPOINTS.auth) {
     url.searchParams.set('request_token', requestToken);
@@ -289,9 +186,8 @@ async function providerJson(fetchImpl, method, endpoint, config, { accessToken, 
   let reader;
   try {
     const response = await withSignal(fetchImpl(url.toString(), options), options.signal, stage);
-    if (response.status !== 200) {
+    if (response.status !== 200 && !(endpoint === ENDPOINTS.holdings && response.status === 201)) {
       const diagnostic = { stage, reason: 'http_status', http_status: response.status };
-      if (endpoint === ENDPOINTS.profile && method === 'GET' && response.status === 422) diagnostic.validation = await readProfileValidation(response, options.signal);
       throw new FlowError('provider_failed', 502, diagnostic);
     }
     if (!response.body) throw new FlowError('provider_failed', 502, { stage, reason: 'response_shape' });
@@ -365,7 +261,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       const config = configFrom(env);
       if (req.method === 'GET') {
         if (query.length > 1 || (query.length === 1 && (query[0][0] !== 'action' || query[0][1] !== 'health'))) throw new FlowError('invalid_request');
-        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1, profile_method: 'GET', validation_diagnostics_version: 1 });
+        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', profile_verification: false });
         return;
       }
       if (req.method !== 'POST') {
@@ -375,7 +271,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       if (query.length !== 0) throw new FlowError('invalid_request');
       if (req.headers?.origin !== ORIGIN) throw new FlowError('origin_not_allowed', 403);
       const body = await readBody(req);
-      const actions = { start: ['action', 'expected_user_id'], callback: ['action', 'request_token'], clear: ['action'] };
+      const actions = { start: ['action'], callback: ['action', 'request_token'], clear: ['action'] };
       if (typeof body.action !== 'string' || !Object.hasOwn(actions, body.action)) throw new FlowError('invalid_request');
       const fields = actions[body.action];
       if (Object.keys(body).some(key => !fields.includes(key))) throw new FlowError('invalid_request');
@@ -387,7 +283,6 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       if (body.action === 'callback') res.setHeader('Set-Cookie', cookieHeader('', 0));
       if (!config) throw new FlowError('not_configured', 503);
       if (body.action === 'start') {
-        if (!matchesOwner(body.expected_user_id, config)) throw new FlowError('account_mismatch', 403, { stage: 'request', reason: 'owner_mismatch' });
         const session = sealSession(config, now());
         res.setHeader('Set-Cookie', cookieHeader(session.cookie, TTL_SECONDS));
         const login = new URL(ENDPOINTS.login);
@@ -405,14 +300,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
         accessToken = auth.accessToken || auth.access_token;
         if (![undefined, 'success'].includes(auth.status)) throw new FlowError('provider_failed', 502, { stage: 'token_exchange', reason: 'response_shape' });
         if (accessToken == null || accessToken === '') throw new FlowError('provider_failed', 502, { stage: 'token_exchange', reason: 'token_missing' });
-        if (!validText(accessToken, 8192)) throw new FlowError('provider_failed', 502, { stage: 'token_exchange', reason: 'response_shape' });
-        if (session.exp <= Math.floor(now() / 1000)) throw new FlowError('session_expired', 410);
-        const profile = await providerJson(fetchImpl, 'GET', ENDPOINTS.profile, config, { accessToken, overallSignal, requestTimeoutMs });
-        if (profile.status !== 'success' || !Array.isArray(profile.data) || profile.data.length !== 1 || !profile.data[0] || typeof profile.data[0] !== 'object') throw new FlowError('provider_failed', 502, { stage: 'profile', reason: 'response_shape' });
-        const userId = profile.data[0].user_id;
-        if (!(typeof userId === 'string' || (typeof userId === 'number' && Number.isSafeInteger(userId)))
-          || !validText(String(userId), 80) || !String(userId).trim()) throw new FlowError('provider_failed', 502, { stage: 'profile', reason: 'identity_shape' });
-        if (!matchesOwner(String(userId), config)) throw new FlowError('account_mismatch', 403);
+        if (!validText(accessToken, 8192) || !accessToken.trim()) throw new FlowError('provider_failed', 502, { stage: 'token_exchange', reason: 'response_shape' });
         if (session.exp <= Math.floor(now() / 1000)) throw new FlowError('session_expired', 410);
         const holdings = await providerJson(fetchImpl, 'GET', ENDPOINTS.holdings, config, { accessToken, overallSignal, requestTimeoutMs });
         if (session.exp <= Math.floor(now() / 1000)) throw new FlowError('session_expired', 410);

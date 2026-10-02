@@ -167,7 +167,7 @@ test('session-invalid guidance asks for the same browser and tab and a fresh sig
   assert.match(message, /new.*sign.?in|sign.?in.*again|start.*sign.?in/iu);
 });
 
-test('provider failures give distinct sign-in, account and holdings guidance', () => {
+test('provider failures give distinct sign-in, request and holdings guidance', () => {
   const messages = ['token_exchange', 'profile', 'holdings'].map((stage) => {
     const result = safeHoldingsError({ code: 'provider_failed', diagnostic: { stage, reason: 'transport' } });
     assertSafeShape(result);
@@ -175,9 +175,21 @@ test('provider failures give distinct sign-in, account and holdings guidance', (
     return result.message;
   });
   assert.match(messages[0], /sign.?in/iu);
-  assert.match(messages[1], /account/iu);
+  assert.match(messages[1], /request/iu);
   assert.match(messages[2], /holdings/iu);
   assert.equal(new Set(messages).size, 3);
+});
+
+test('setup and legacy identity errors do not request a client ID or claim account verification', () => {
+  for (const value of [
+    { code: 'not_configured' },
+    { code: 'account_mismatch' },
+    { code: 'provider_failed', diagnostic: { stage: 'profile', reason: 'http_status', http_status: 422 } },
+  ]) {
+    const result = safeHoldingsError(value);
+    assertSafeShape(result);
+    assert.doesNotMatch(result.message, /client.?id|expected account|owner|account verification/iu);
+  }
 });
 
 test('all local error categories produce only allowlisted references', () => {

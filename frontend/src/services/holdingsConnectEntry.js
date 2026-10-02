@@ -184,8 +184,10 @@ function validSnapshotDate(value) {
 export function validateHoldingsSnapshot(value) {
   try {
     if (!value || typeof value !== 'object' || Array.isArray(value)
-      || value.snapshot_version !== 1 || value.source !== 'HDFC InvestRight'
-      || value.account_verified !== true || !validSnapshotDate(value.as_of_utc)
+      || value.snapshot_version !== 2 || value.source !== 'HDFC InvestRight'
+      || value.account_authenticated !== true
+      || value.identity_verification !== 'broker_authentication'
+      || !validSnapshotDate(value.as_of_utc)
       || !Array.isArray(value.holdings) || value.holdings.length > 5000
       || !Number.isSafeInteger(value.holdings_count)
       || value.holdings_count !== value.holdings.length) throw new Error();
@@ -211,8 +213,9 @@ export function validateHoldingsSnapshot(value) {
       return clone;
     });
     return {
-      snapshot_version: 1, source: 'HDFC InvestRight', as_of_utc: value.as_of_utc,
-      account_verified: true, holdings_count: holdings.length, holdings,
+      snapshot_version: 2, source: 'HDFC InvestRight', as_of_utc: value.as_of_utc,
+      account_authenticated: true, identity_verification: 'broker_authentication',
+      holdings_count: holdings.length, holdings,
     };
   } catch {
     throw new Error('Invalid holdings snapshot.');

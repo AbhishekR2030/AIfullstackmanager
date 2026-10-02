@@ -39,7 +39,8 @@ function SnapshotView({ snapshot, onClear }) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   return <>
-    <p className="hc-eyebrow">HDFC InvestRight · verified account</p><h1>Your holdings snapshot</h1>
+    <p className="hc-eyebrow">HDFC InvestRight · sign-in completed</p><h1>Your holdings snapshot</h1>
+    <p>These holdings are for the account returned by your HDFC sign-in.</p>
     <p className="hc-notice" role="status">Loaded {new Date(snapshot.as_of_utc).toLocaleString()}. Sign in again to update this snapshot.</p>
     <p className="hc-small">Holdings remain on this page for up to 10 minutes and clear when you leave. Download JSON saves a dated file on your device; clearing this page does not delete that file.</p>
     <div className="hc-result-header"><button type="button" onClick={download}>Download JSON snapshot</button><button type="button" className="hc-secondary" onClick={onClear}>Clear this page</button></div>
@@ -53,7 +54,6 @@ function SnapshotView({ snapshot, onClear }) {
 function PhonePage({ entry }) {
   const [phase, setPhase] = useState(entry.error || (entry.kind === 'callback' && !entry.requestToken) ? 'invalid_request' : entry.kind === 'callback' ? 'processing' : 'checking');
   const [failure, setFailure] = useState(entry.error || (entry.kind === 'callback' && !entry.requestToken) ? localHoldingsError('callback') : null);
-  const [userId, setUserId] = useState('');
   const [snapshot, setSnapshot] = useState(null);
   const lifecycle = useRef({ submitted: false, mounted: false, deadline: 0, timer: null });
 
@@ -82,7 +82,8 @@ function PhonePage({ entry }) {
       } else if (!entry.error) {
         requestJson('health').then((value) => {
           if (!life.mounted) return;
-          if (value.version !== 'holdings-phone-v1') throw new FlowFailure(localHoldingsError('shape'));
+          if (value.version !== 'holdings-phone-v2' || value.profile_verification !== false
+            || value.auth_method !== 'token_exchange' || value.holdings_method !== 'GET') throw new FlowFailure(localHoldingsError('shape'));
           setFailure(value.configured === true ? null : localHoldingsError('configuration'));
           setPhase(value.configured === true ? 'initial' : 'not_configured');
         }).catch((error) => {
@@ -96,7 +97,7 @@ function PhonePage({ entry }) {
   useEffect(() => {
     const clearLocal = (nextPhase) => {
       lifecycle.current.deadline = 0; clearTimeout(lifecycle.current.timer);
-      setSnapshot(null); setUserId(''); setPhase(nextPhase);
+      setSnapshot(null); setPhase(nextPhase);
     };
     const checkDeadline = () => {
       if (lifecycle.current.deadline && Date.now() >= lifecycle.current.deadline) clearLocal('expired');
@@ -109,11 +110,10 @@ function PhonePage({ entry }) {
 
   const start = async (event) => {
     event.preventDefault(); if (phase !== 'initial') return;
-    const expectedUserId = userId.trim(); if (!expectedUserId || expectedUserId.length > 80) return;
-    setPhase('starting'); setFailure(null); setUserId('');
+    setPhase('starting'); setFailure(null);
     try {
       if (!markHdfcFlowIntent('standalone')) throw new FlowFailure(safeHoldingsError({ code: 'session_invalid', diagnostic: { stage: 'session', reason: 'session' } }));
-      const result = await requestJson('start', { expected_user_id: expectedUserId });
+      const result = await requestJson('start');
       let loginUrl = result.login_url; result.login_url = null;
       if (!validHdfcLoginUrl(loginUrl) || !Number.isFinite(Date.parse(result.expires_at)) || Date.parse(result.expires_at) <= Date.now()) throw new FlowFailure(localHoldingsError('shape'));
       window.location.assign(loginUrl); loginUrl = null;
@@ -124,15 +124,15 @@ function PhonePage({ entry }) {
   const clear = () => {
     requestJson('clear').catch(() => {});
     lifecycle.current.deadline = 0; clearTimeout(lifecycle.current.timer);
-    clearEntrySecrets(entry); setSnapshot(null); setUserId(''); setFailure(null); setPhase('initial');
+    clearEntrySecrets(entry); setSnapshot(null); setFailure(null); setPhase('initial');
   };
 
   if (phase === 'ready' && snapshot && Date.now() < lifecycle.current.deadline) return <SnapshotView snapshot={snapshot} onClear={clear} />;
   return <>
     <p className="hc-eyebrow">HDFC InvestRight · same phone</p><h1>Load a current holdings snapshot</h1>
     <p>Sign in on this phone and view your holdings here. Sign in again to update the snapshot.</p>
-    {['checking', 'processing', 'starting'].includes(phase) && <p role="status">{phase === 'checking' ? 'Checking availability…' : phase === 'starting' ? 'Opening official HDFC sign-in…' : 'Verifying your account and loading holdings…'}</p>}
-    {phase === 'initial' && <form onSubmit={start}><label htmlFor="hc-user-id">Your HDFC client / user ID</label><input id="hc-user-id" value={userId} onChange={(event) => setUserId(event.target.value)} maxLength={80} required autoComplete="off" autoCapitalize="none" spellCheck={false} aria-describedby="hc-user-help" /><p id="hc-user-help" className="hc-small">Enter the account ID whose holdings you want to view. Your password, OTP, and consent belong only on HDFC’s official page.</p><button type="submit">Continue to HDFC</button></form>}
+    {['checking', 'processing', 'starting'].includes(phase) && <p role="status">{phase === 'checking' ? 'Checking availability…' : phase === 'starting' ? 'Opening official HDFC sign-in…' : 'Completing HDFC sign-in and loading holdings…'}</p>}
+    {phase === 'initial' && <form onSubmit={start}><p className="hc-small">Sign in to the HDFC account whose holdings you want to view. Your client ID, password, OTP, and consent belong only on HDFC’s official page.</p><button type="submit">Continue to HDFC</button></form>}
     {!['checking', 'processing', 'starting', 'initial', 'cleared', 'expired'].includes(phase) && <div className="hc-notice hc-error" role="alert">
       <p>{(failure || safeHoldingsError({ code: phase })).message}</p>
       {failure?.reference && <p className="hc-small hc-reference">Reference: {failure.reference}</p>}

@@ -297,8 +297,9 @@ test('same-phone and instruction-only Mac entries clear query and fragment witho
 
 function snapshotFixture() {
   return {
-    snapshot_version: 1, source: 'HDFC InvestRight',
-    as_of_utc: '2026-10-02T12:34:56.123456+00:00', account_verified: true,
+    snapshot_version: 2, source: 'HDFC InvestRight',
+    as_of_utc: '2026-10-02T12:34:56.123456+00:00', account_authenticated: true,
+    identity_verification: 'broker_authentication',
     holdings_count: 1,
     holdings: [{ isin: 'INE000TEST001', company_name: 'Offline Example Ltd', security_id: '123',
       exchange: 'NSE', quantity: 3, average_price: 100, investment_value: 300, close_price: null }],
@@ -310,6 +311,7 @@ test('validates the backend snapshot fixture and copies only whitelist fields', 
   input.account_id = 'offline-account-field';
   input.access_token = 'offline-token-field';
   input.provider_payload = { secret: 'offline-value' };
+  input.account_verified = true;
   input.holdings[0].api_key = 'offline-key-field';
   const expected = snapshotFixture();
   const clone = validateHoldingsSnapshot(input);
@@ -318,6 +320,7 @@ test('validates the backend snapshot fixture and copies only whitelist fields', 
   assert.notEqual(clone.holdings, input.holdings);
   assert.notEqual(clone.holdings[0], input.holdings[0]);
   assert.equal(JSON.stringify(clone).includes('offline-token-field'), false);
+  assert.equal(Object.hasOwn(clone, 'account_verified'), false);
   const empty = snapshotFixture();
   empty.holdings = [];
   empty.holdings_count = 0;
@@ -325,10 +328,10 @@ test('validates the backend snapshot fixture and copies only whitelist fields', 
   assert.deepEqual(validateHoldingsSnapshot(empty), empty);
 });
 
-test('snapshot rejects malformed and unverified envelopes with generic errors', () => {
+test('snapshot rejects malformed and unauthenticated envelopes with generic errors', () => {
   for (const overrides of [
-    { snapshot_version: 2 }, { source: 'other' }, { account_verified: false },
-    { account_verified: 'true' }, { as_of_utc: '2026-02-30T12:34:56Z' },
+    { snapshot_version: 1 }, { source: 'other' }, { account_authenticated: false },
+    { account_authenticated: 'true' }, { as_of_utc: '2026-02-30T12:34:56Z' },
     { as_of_utc: '2026-10-02T25:34:56Z' }, { as_of_utc: 'not-a-date' },
     { as_of_utc: '2026-10-02' }, { as_of_utc: '2026-10-02T12:34:56+05:30' },
     { holdings_count: 2 }, { holdings_count: 1.5 }, { holdings_count: '1' },
@@ -337,6 +340,38 @@ test('snapshot rejects malformed and unverified envelopes with generic errors', 
   for (const value of [null, [], {}, 'offline-secret-input']) {
     assert.throws(() => validateHoldingsSnapshot(value), { message: 'Invalid holdings snapshot.' });
   }
+});
+
+test('snapshot v2 requires exact broker authentication metadata without coercion', () => {
+  for (const overrides of [
+    { snapshot_version: '2' }, { snapshot_version: 3 },
+    { account_authenticated: undefined }, { account_authenticated: null },
+    { account_authenticated: 1 }, { account_authenticated: Object(true) },
+    { identity_verification: undefined }, { identity_verification: null },
+    { identity_verification: 'profile' }, { identity_verification: 'BROKER_AUTHENTICATION' },
+    { identity_verification: Object('broker_authentication') },
+    { identity_verification: 'offline-secret-input' },
+  ]) {
+    assert.throws(() => validateHoldingsSnapshot({ ...snapshotFixture(), ...overrides }), {
+      message: 'Invalid holdings snapshot.',
+    });
+  }
+});
+
+test('legacy v1 and account_verified-only snapshots cannot satisfy the v2 contract', () => {
+  const legacy = snapshotFixture();
+  legacy.snapshot_version = 1;
+  legacy.account_verified = true;
+  delete legacy.account_authenticated;
+  delete legacy.identity_verification;
+  assert.throws(() => validateHoldingsSnapshot(legacy), { message: 'Invalid holdings snapshot.' });
+  legacy.snapshot_version = 2;
+  assert.throws(() => validateHoldingsSnapshot(legacy), { message: 'Invalid holdings snapshot.' });
+  legacy.account_authenticated = true;
+  assert.throws(() => validateHoldingsSnapshot(legacy), { message: 'Invalid holdings snapshot.' });
+  delete legacy.account_authenticated;
+  legacy.identity_verification = 'broker_authentication';
+  assert.throws(() => validateHoldingsSnapshot(legacy), { message: 'Invalid holdings snapshot.' });
 });
 
 test('snapshot rejects invalid row text, quantity and optional numeric values', () => {

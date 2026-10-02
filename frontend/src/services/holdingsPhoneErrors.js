@@ -11,12 +11,12 @@ const VALIDATION_FIELDS = new Set([
 ]);
 const VALIDATION_KINDS = new Set(['missing', 'invalid']);
 const MESSAGES = Object.freeze({
-  not_configured: 'This holdings page needs owner setup before it can be used.',
+  not_configured: 'This holdings page needs setup before it can be used.',
   invalid_request: 'This sign-in response could not be verified. Start a new sign-in.',
   origin_not_allowed: 'Open the production holdings page and start a new sign-in.',
   session_invalid: 'Start a new sign-in and complete it in the same browser and tab on this phone.',
   session_expired: 'This sign-in has expired. Start a new sign-in in the same browser and tab.',
-  account_mismatch: 'HDFC could not verify the expected account. Start again with the correct HDFC client ID.',
+  account_mismatch: 'This sign-in response could not be completed. Start a new HDFC sign-in.',
   provider_failed: 'HDFC could not complete this request. Please ask for help with this error.',
   unavailable: 'The holdings service is unavailable. Please try again later.',
   failed: 'The holdings snapshot could not be verified. Please start again.',
@@ -87,7 +87,7 @@ export function safeHoldingsError(value) {
       }
       if (code === 'provider_failed') {
         if (stage === 'token_exchange') message = 'HDFC sign-in could not be completed. Share the reference below for help.';
-        if (stage === 'profile') message = 'HDFC account verification could not be completed. Share the reference below for help.';
+        if (stage === 'profile') message = 'HDFC could not complete this request. Share the reference below for help.';
         if (stage === 'holdings') message = 'HDFC holdings could not be loaded. Share the reference below for help.';
       }
       if (code === 'unavailable' && reason === 'transport') {
