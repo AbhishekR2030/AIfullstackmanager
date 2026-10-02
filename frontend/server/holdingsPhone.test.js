@@ -44,7 +44,7 @@ function fakeProvider({ holdings, responseOverrides = [] } = {}) {
 
 test('health reports configured boolean and never exposes server values', async () => {
   const result = await invoke(create(), { method: 'GET' });
-  assert.deepEqual(result.body, { version: 'holdings-phone-v2', configured: true, diagnostics_version: 1, holdings_diagnostics_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', profile_verification: false });
+  assert.deepEqual(result.body, { version: 'holdings-phone-v2', configured: true, diagnostics_version: 1, holdings_diagnostics_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', holdings_auth_mode: 'raw_token', profile_verification: false });
   assert.equal(result.headers['cache-control'], 'no-store, private');
   assert.equal(result.headers['referrer-policy'], 'no-referrer');
   for (const value of Object.values(ENV)) assert.ok(!result.raw.includes(value));
@@ -164,7 +164,7 @@ test('authenticated snapshot calls only auth POST and holdings GET', async () =>
   }
   assert.equal(new URL(fake.calls[0].url).searchParams.get('request_token'), 'synthetic-request-token');
   assert.deepEqual(JSON.parse(fake.calls[0].options.body), { apiSecret: 'synthetic-api-secret' });
-  assert.equal(fake.calls[1].options.headers.Authorization, 'Bearer synthetic-access-token');
+  assert.equal(fake.calls[1].options.headers.Authorization, 'synthetic-access-token');
   for (const value of ['synthetic-access-token', 'synthetic-request-token', 'synthetic-api-secret', 'DEMOUSER', 'private_profile', 'raw_private_field']) assert.ok(!result.raw.includes(value));
 });
 
@@ -374,7 +374,7 @@ test('ordinary browser retry after callback cookie clearing cannot read again', 
   assert.equal(fake.calls.length, 2);
 });
 
-test('holdings200 and201 use exact original headers only after successful token exchange', async () => {
+test('holdings200 and201 use documented raw token headers only after successful token exchange', async () => {
   for (const status of [200, 201]) {
     const payload = { status: 'success', data: [{ isin: 'DEMO00000001', quantity: 0, user_id: 'SYNTHETIC-PRIVATE-ID', accessToken: 'synthetic-access-token', private_profile: unsafeBody }] };
     const fake = fakeProvider({ responseOverrides: [undefined, new Response(JSON.stringify(payload), { status })] });
@@ -394,7 +394,7 @@ test('holdings200 and201 use exact original headers only after successful token 
     assert.deepEqual(JSON.parse(auth.options.body), { apiSecret: ENV.HDFC_API_SECRET });
     const holdings = fake.calls[1];
     assert.deepEqual([...new URL(holdings.url).searchParams], [['api_key', ENV.HDFC_API_KEY]]);
-    assert.deepEqual(holdings.options.headers, { Accept: 'application/json', 'User-Agent': 'AlphaSeeker-Holdings-Phone/1.0', Authorization: 'Bearer synthetic-access-token', 'x-api-key': ENV.HDFC_API_KEY });
+    assert.deepEqual(holdings.options.headers, { Accept: 'application/json', 'User-Agent': 'AlphaSeeker-Holdings-Phone/1.0', Authorization: 'synthetic-access-token' });
     assert.equal(holdings.options.body, undefined);
     for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
   }
@@ -434,7 +434,8 @@ test('holdings failures never fall back to profile, retry or change authenticati
     assert.equal(result.body.error.diagnostic.http_status, status);
     if (status !== 422) assert.deepEqual(result.body.error.diagnostic, { stage: 'holdings', reason: 'http_status', http_status: status });
     assert.equal(fake.calls.length, 2);
-    assert.equal(fake.calls[1].options.headers.Authorization, 'Bearer synthetic-access-token');
+    assert.equal(fake.calls[1].options.headers.Authorization, 'synthetic-access-token');
+    assert.equal(fake.calls[1].options.headers['x-api-key'], undefined);
     for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
   }
 });
@@ -471,8 +472,8 @@ test('whole callback classifies published static authentication messages without
   ]) {
     const result = await callback422(errorResponse(payload));
     assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'authentication_required' });
-    assert.equal(result.calls[1].options.headers.Authorization, 'Bearer synthetic-access-token');
-    assert.equal(result.calls[1].options.headers['x-api-key'], ENV.HDFC_API_KEY);
+    assert.equal(result.calls[1].options.headers.Authorization, 'synthetic-access-token');
+    assert.equal(result.calls[1].options.headers['x-api-key'], undefined);
     assert.deepEqual([...new URL(result.calls[1].url).searchParams], [['api_key', ENV.HDFC_API_KEY]]);
     assert.equal(result.calls[1].options.body, undefined);
   }
@@ -681,8 +682,8 @@ test('uninformative422 reports only exact gated format booleans and preserves to
   const env = { ...ENV, HDFC_API_KEY: ' synthetic-api-key ' };
   const result = await callback422(errorResponse({ private_profile: unsafeBody }), { auth, env });
   assert.deepEqual(result.body.error.diagnostic.format_flags, { api_key_has_outer_whitespace: true, token_has_whitespace: true, token_has_bearer_prefix: true, top_level_token_fields_conflict: true });
-  assert.equal(result.calls[1].options.headers.Authorization, 'Bearer Bearer synthetic-access-token');
-  assert.equal(result.calls[1].options.headers['x-api-key'], env.HDFC_API_KEY);
+  assert.equal(result.calls[1].options.headers.Authorization, 'Bearer synthetic-access-token');
+  assert.equal(result.calls[1].options.headers['x-api-key'], undefined);
   assert.equal(new URL(result.calls[1].url).searchParams.get('api_key'), env.HDFC_API_KEY);
   for (const snakeToken of [undefined, '', ' ', 123, { value: 'private' }, 'synthetic-access-token']) {
     const fixture = await callback422(errorResponse({}), { auth: { accessToken: 'synthetic-access-token', access_token: snakeToken } });
@@ -729,4 +730,59 @@ test('concurrent callbacks keep optional diagnostics isolated and make no logs',
     assert.equal(second.body.error.diagnostic.format_flags, undefined);
     assert.equal(logs, 0);
   } finally { console.log = originalLog; console.error = originalError; }
+});
+
+test('successful holdings sends the selected token verbatim with no additional authentication header or request', async () => {
+  for (const accessToken of ['synthetic-access-token', 'Bearer synthetic-access-token', ' synthetic-access-token ', 'synthetic+/%token']) {
+    const fake = fakeProvider({ responseOverrides: [new Response(JSON.stringify({ accessToken, access_token: 'different-synthetic-access-token' }))] });
+    const handler = create(fake.fetchImpl);
+    const cookie = await started(handler);
+    const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.account_authenticated, true);
+    assert.equal(fake.calls.length, 2);
+    assert.deepEqual(fake.calls.map(({ url, options }) => [options.method, new URL(url).origin + new URL(url).pathname]), [['POST', ENDPOINTS.auth], ['GET', ENDPOINTS.holdings]]);
+    assert.deepEqual(fake.calls[1].options.headers, { Accept: 'application/json', 'User-Agent': 'AlphaSeeker-Holdings-Phone/1.0', Authorization: accessToken });
+    assert.deepEqual([...new URL(fake.calls[1].url).searchParams], [['api_key', ENV.HDFC_API_KEY]]);
+    assert.equal(fake.calls[1].options.body, undefined);
+    assert.equal(result.body.error, undefined);
+    assert.equal(result.body.format_flags, undefined);
+    assert.ok(!result.raw.includes(accessToken));
+  }
+});
+
+test('finite static message aliases classify only full known phrases inside the actual callback', async () => {
+  const aliases = ['message', 'Message', 'MESSAGE', 'msg', 'Msg', 'MSG', 'errorMessage', 'ErrorMessage', 'error_message', 'ERROR_MESSAGE', 'errorMsg', 'error_msg', 'displayMessage', 'DisplayMessage', 'display_message', 'displaymessage', 'status_error', 'description', 'detail', 'error', 'Error', 'ERROR'];
+  for (const alias of aliases) {
+    const recognized = await callback422(errorResponse({ [alias]: 'Invalid API key', private_profile: unsafeBody }));
+    assert.deepEqual(recognized.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'api_key_rejected' });
+    assert.equal(recognized.calls[1].options.headers.Authorization, 'synthetic-access-token');
+    assert.equal(recognized.calls[1].options.headers['x-api-key'], undefined);
+    const privateMessage = await callback422(errorResponse({ [alias]: 'Invalid API key for SYNTHETIC-PRIVATE-ID', private_profile: unsafeBody }));
+    assert.deepEqual(privateMessage.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
+  }
+  for (const payload of [{ mEsSaGe: 'Invalid API key' }, { Status_Error: 'Invalid API key' }, { arbitrary: { Message: 'Invalid API key' } }]) {
+    const ignored = await callback422(errorResponse(payload));
+    assert.equal(ignored.body.error.diagnostic.error_outcome, 'unknown');
+    assert.equal(ignored.body.error.diagnostic.error_category, 'unknown');
+  }
+});
+
+test('finite static code aliases recognize exact60014 only without claiming empty holdings', async () => {
+  for (const alias of ['code', 'Code', 'CODE', 'errorCode', 'ErrorCode', 'error_code', 'ERROR_CODE', 'errorcode']) {
+    for (const code of [60014, '60014']) {
+      const result = await callback422(errorResponse({ [alias]: code, Message: 'sensitive-provider-response', private_profile: unsafeBody }));
+      assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'unknown', provider_code: '60014' });
+      assert.equal(result.body.holdings, undefined);
+      assert.equal(result.body.holdings_count, undefined);
+      assert.equal(result.body.account_authenticated, undefined);
+    }
+    for (const code of [60015, '60014 ', 'SYNTHETIC-PRIVATE-ID']) {
+      const unknown = await callback422(errorResponse({ [alias]: code, private_profile: unsafeBody }));
+      assert.deepEqual(unknown.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
+    }
+  }
+  const unmapped = await callback422(errorResponse({ cOdE: 60014, arbitrary: { Code: 60014 } }));
+  assert.equal(unmapped.body.error.diagnostic.provider_code, undefined);
+  assert.equal(unmapped.body.error.diagnostic.error_outcome, 'unknown');
 });

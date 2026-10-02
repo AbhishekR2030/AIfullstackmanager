@@ -96,10 +96,15 @@ function assertProviderContract(calls, token = TOKEN) {
   assert.deepEqual(JSON.parse(auth.options.body), { apiSecret: SECRET });
   assert.equal(auth.options.headers['Content-Type'], 'application/json');
   assert.deepEqual([...holdings.url.searchParams], [['api_key', KEY]]);
-  assert.equal(holdings.options.headers.Authorization, `Bearer ${token}`);
-  assert.equal(holdings.options.headers['x-api-key'], KEY);
+  assert.equal(holdings.options.headers.Authorization, token);
+  assert.deepEqual(Object.keys(holdings.options.headers).sort(), ['Accept', 'Authorization', 'User-Agent']);
+  assert.equal(holdings.options.headers.Accept, 'application/json');
+  assert.equal(Object.hasOwn(holdings.options.headers, 'x-api-key'), false);
   assert.ok(holdings.options.headers['User-Agent']);
   assert.equal(holdings.options.body, undefined);
+  assert.equal(calls.filter(({ url, options }) => options.method === 'GET'
+    && url.pathname === '/oapi/v1/portfolio/holdings').length, 1,
+  'holdings uses one GET without retry or a header fallback');
   for (const call of calls) {
     assert.equal(call.options.redirect, 'error');
     assert.equal(call.options.cache, 'no-store');
@@ -107,7 +112,7 @@ function assertProviderContract(calls, token = TOKEN) {
 }
 
 for (const holdingsStatus of [200, 201]) {
-  test(`holdings HTTP ${holdingsStatus} reaches the actual phone validator through the two-request original flow`, async () => {
+  test(`holdings HTTP ${holdingsStatus} reaches the actual phone validator with raw token Authorization`, async () => {
     const flow = fixture({ holdingsStatus });
     const cookie = await begin(flow);
     const read = await flow.invoke({ action: 'callback', request_token: REQUEST_TOKEN }, cookie);
@@ -238,6 +243,7 @@ for (const [label, body] of [
 for (const [label, body] of [
   ['numeric code', { code: 60014, message: PRIVATE_MARKER }],
   ['nested string code', { error: { errorCode: '60014', description: PRIVATE_MARKER, input: TOKEN } }],
+  ['capitalized code alias', { ErrorCode: 60014, MSG: PRIVATE_MARKER, input: TOKEN }],
 ]) {
   test(`compatibility ${label} reports literal60014 and never claims an empty portfolio`, async () => {
     const { failure } = await verify422(fixture({ holdingsStatus: 422, holdings: body }),
@@ -265,6 +271,45 @@ for (const [label, body, category] of CATEGORY_CASES) {
   });
 }
 
+for (const [field, message, category] of [
+  ['msg', 'Invalid token', 'access_token_rejected'],
+  ['MSG', 'Invalid API key', 'api_key_rejected'],
+  ['status_error', 'Unprocessable entity', 'unprocessable_request'],
+  ['DisplayMessage', 'Full authentication is required to access this resource', 'authentication_required'],
+  ['ErrorMessage', 'Invalid or expired token', 'access_token_rejected'],
+]) {
+  test(`static compatibility alias ${field} is classified through the real frontend formatter`, async () => {
+    const { failure, safe } = await verify422(fixture({ holdingsStatus: 422, holdings: { [field]: message } }),
+      `.R.classified.M.json.E.${category}`);
+    assert.equal(JSON.stringify(failure.body).includes(message), false);
+    assert.equal(JSON.stringify(safe).includes(message), false);
+  });
+}
+
+test('unknown messages in the added static aliases are never echoed or guessed', async () => {
+  const unknown = `${PRIVATE_MARKER} ${TOKEN} ${KEY}`;
+  const { failure } = await verify422(fixture({ holdingsStatus: 422, holdings: {
+    msg: unknown, MSG: unknown, status_error: unknown, DisplayMessage: unknown,
+    ErrorMessage: unknown, ErrorCode: '60015', user_id: PRIVATE_MARKER,
+  } }), `.R.unknown.M.json.E.unknown${FALSE_FLAGS}`, { flags: true });
+  assert.equal(JSON.stringify(failure.body).includes('60015'), false);
+});
+
+test('non422 holdings failures make a single raw-token GET with no auth retry or header fallback', async () => {
+  for (const status of [401, 403, 404]) {
+    const flow = fixture({ holdingsStatus: status, holdings: { ErrorCode: 60014, msg: 'Invalid token' } });
+    const cookie = await begin(flow);
+    const failure = await flow.invoke({ action: 'callback', request_token: REQUEST_TOKEN }, cookie);
+    assert.equal(failure.statusCode, 502);
+    assert.equal(safeHoldingsError(failure.body.error).reference, `holdings.http_status.HTTP${status}`);
+    assert.deepEqual(failure.body.error.diagnostic, { stage: 'holdings', reason: 'http_status', http_status: status });
+    assertProviderContract(flow.calls);
+    assert.throws(() => validateHoldingsSnapshot(failure.body), /Invalid holdings snapshot/);
+    assertNoPrivateValues(failure.body);
+    assertCleared(failure);
+  }
+});
+
 test('recognized plain-text message is classified while retaining its text MIME category', async () => {
   await verify422(fixture({ holdingsStatus: 422, holdingsBody: 'Invalid or expired token', holdingsContentType: 'text/plain' }),
     '.R.classified.M.text.E.access_token_rejected');
@@ -275,7 +320,7 @@ test('recognized JSON under absent MIME remains classified without exposing head
     '.R.classified.M.absent.E.authentication_required');
 });
 
-test('unknown nested body exposes only booleans and preserves selected token bytes and camel-first precedence', async () => {
+test('unknown nested body preserves an already-prefixed raw token and camel-first precedence without adding Bearer', async () => {
   const selectedToken = `Bearer ${TOKEN} `;
   const flow = fixture({
     auth: { accessToken: selectedToken, access_token: `${TOKEN}-alternate` },
@@ -290,6 +335,14 @@ test('unknown nested body exposes only booleans and preserves selected token byt
     token_has_bearer_prefix: true, top_level_token_fields_conflict: true,
   });
   assert.equal(JSON.stringify(failure.body).includes('60015'), false);
+});
+
+test('raw token whitespace is preserved in request options without adding or stripping a prefix', async () => {
+  const selectedToken = ` ${TOKEN} `;
+  await verify422(fixture({ auth: { accessToken: selectedToken }, holdingsStatus: 422,
+    holdings: { msg: PRIVATE_MARKER } }),
+  '.R.unknown.M.json.E.unknown.F.key_space.false.F.token_space.true.F.bearer_prefix.false.F.token_conflict.false',
+  { token: selectedToken, flags: true });
 });
 
 const UNINFORMATIVE_CASES = [

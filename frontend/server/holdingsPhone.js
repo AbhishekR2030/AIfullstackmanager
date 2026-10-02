@@ -47,8 +47,8 @@ const ERROR_MESSAGES = Object.freeze({
   unprocessable_request: ['Unprocessable entity', 'Unprocessable request'],
 });
 const MESSAGE_CATEGORIES = new Map(Object.entries(ERROR_MESSAGES).flatMap(([category, messages]) => messages.map(message => [message.toLowerCase(), category])));
-const ERROR_MESSAGE_FIELDS = ['message', 'errorMessage', 'error_message', 'displayMessage', 'description', 'detail', 'error'];
-const ERROR_CODE_FIELDS = ['code', 'errorCode', 'error_code', 'errorcode'];
+const ERROR_MESSAGE_FIELDS = ['message', 'Message', 'MESSAGE', 'msg', 'Msg', 'MSG', 'errorMessage', 'ErrorMessage', 'error_message', 'ERROR_MESSAGE', 'errorMsg', 'error_msg', 'displayMessage', 'DisplayMessage', 'display_message', 'displaymessage', 'status_error', 'description', 'detail', 'error', 'Error', 'ERROR'];
+const ERROR_CODE_FIELDS = ['code', 'Code', 'CODE', 'errorCode', 'ErrorCode', 'error_code', 'ERROR_CODE', 'errorcode'];
 const MAX_ERROR_BYTES = 16 * 1024;
 const MAX_ERROR_MS = 2000;
 const DEFAULT_DIAGNOSTICS = Object.freeze({
@@ -399,8 +399,7 @@ async function providerJson(fetchImpl, method, endpoint, config, { accessToken, 
   const options = { method, headers, redirect: 'error', cache: 'no-store' };
   if (accessToken !== undefined) {
     if (!validText(accessToken, 8192)) throw new FlowError('provider_failed', 502, { stage, reason: 'response_shape' });
-    headers.Authorization = `Bearer ${accessToken}`;
-    headers['x-api-key'] = config.key;
+    headers.Authorization = accessToken;
   }
   if (endpoint === ENDPOINTS.auth) {
     url.searchParams.set('request_token', requestToken);
@@ -492,7 +491,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       const config = configFrom(env);
       if (req.method === 'GET') {
         if (query.length > 1 || (query.length === 1 && (query[0][0] !== 'action' || query[0][1] !== 'health'))) throw new FlowError('invalid_request');
-        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1, holdings_diagnostics_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', profile_verification: false });
+        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1, holdings_diagnostics_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', holdings_auth_mode: 'raw_token', profile_verification: false });
         return;
       }
       if (req.method !== 'POST') {
