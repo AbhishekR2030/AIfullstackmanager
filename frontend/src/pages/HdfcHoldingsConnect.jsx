@@ -1,0 +1,154 @@
+import { useEffect, useRef, useState } from 'react';
+import { clearEntrySecrets, consumeCallbackToken, markHdfcFlowIntent, validHdfcLoginUrl, validateHoldingsSnapshot } from '../services/holdingsConnectEntry';
+
+const API_URL = '/api/holdings-phone';
+const RETENTION_MS = 10 * 60 * 1000;
+const SAFE_ERRORS = {
+  not_configured: 'This holdings page needs owner setup before it can be used.',
+  session_expired: 'This sign-in has expired. Sign in again to load a current snapshot.',
+  account_mismatch: 'HDFC could not verify the expected account. Start again with the correct HDFC client ID.',
+  failed: 'The holdings snapshot could not be verified. Please start again.',
+  unavailable: 'The holdings service is unavailable. Please try again later.',
+};
+
+class FlowFailure extends Error {
+  constructor(code = 'failed') { super('Holdings request could not be completed.'); this.code = code; }
+}
+
+async function requestJson(action, payload = {}) {
+  let response;
+  try {
+    response = await fetch(action === 'health' ? `${API_URL}?action=health` : API_URL, {
+      method: action === 'health' ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store', referrerPolicy: 'no-referrer',
+      headers: { Accept: 'application/json', ...(action !== 'health' ? { 'Content-Type': 'application/json' } : {}) },
+      ...(action !== 'health' ? { body: JSON.stringify({ action, ...payload }) } : {}),
+    });
+  } catch { throw new FlowFailure('unavailable'); }
+  let data;
+  try { data = await response.json(); } catch { throw new FlowFailure('unavailable'); }
+  if (!response.ok) throw new FlowFailure(Object.hasOwn(SAFE_ERRORS, data?.error?.code) ? data.error.code : 'failed');
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new FlowFailure();
+  return data;
+}
+
+function SnapshotView({ snapshot, onClear }) {
+  const number = (value) => value === null ? '—' : value.toLocaleString('en-IN', { maximumFractionDigits: 4 });
+  const download = () => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' }));
+    const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = `hdfc-holdings-${snapshot.as_of_utc.slice(0, 10)}.json`;
+    document.body.appendChild(anchor); anchor.click(); anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  return <>
+    <p className="hc-eyebrow">HDFC InvestRight · verified account</p><h1>Your holdings snapshot</h1>
+    <p className="hc-notice" role="status">Loaded {new Date(snapshot.as_of_utc).toLocaleString()}. Sign in again to update this snapshot.</p>
+    <p className="hc-small">Holdings remain on this page for up to 10 minutes and clear when you leave. Download JSON saves a dated file on your device; clearing this page does not delete that file.</p>
+    <div className="hc-result-header"><button type="button" onClick={download}>Download JSON snapshot</button><button type="button" className="hc-secondary" onClick={onClear}>Clear this page</button></div>
+    {snapshot.holdings_count === 0 ? <p>No holdings were returned by HDFC.</p> : <div className="hc-table-wrap" tabIndex={0} aria-label="Holdings table; scroll horizontally for all columns">
+      <table><caption className="hc-visually-hidden">HDFC holdings snapshot</caption><thead><tr><th scope="col">Company</th><th scope="col">ISIN</th><th scope="col">Security ID</th><th scope="col">Exchange</th><th scope="col">Quantity</th><th scope="col">Average price (₹)</th><th scope="col">Investment (₹)</th><th scope="col">Close price (₹)</th></tr></thead>
+        <tbody>{snapshot.holdings.map((row, index) => <tr key={`${row.isin}-${row.security_id}-${index}`}><td>{row.company_name || '—'}</td><td>{row.isin || '—'}</td><td>{row.security_id || '—'}</td><td>{row.exchange || '—'}</td><td>{number(row.quantity)}</td><td>{number(row.average_price)}</td><td>{number(row.investment_value)}</td><td>{number(row.close_price)}</td></tr>)}</tbody></table>
+    </div>}
+  </>;
+}
+
+function PhonePage({ entry }) {
+  const [phase, setPhase] = useState(entry.kind === 'callback' ? (entry.error ? 'failed' : 'processing') : (entry.error ? 'failed' : 'checking'));
+  const [userId, setUserId] = useState('');
+  const [snapshot, setSnapshot] = useState(null);
+  const lifecycle = useRef({ submitted: false, mounted: false, deadline: 0, timer: null });
+
+  useEffect(() => {
+    const life = lifecycle.current; life.mounted = true;
+    if (!life.submitted) {
+      life.submitted = true;
+      if (entry.kind === 'callback') {
+        const token = consumeCallbackToken(entry);
+        if (token && !entry.error) {
+          const payload = { request_token: token };
+          const pending = requestJson('callback', payload);
+          payload.request_token = null;
+          pending.then((value) => {
+            if (!life.mounted) return;
+            const clean = validateHoldingsSnapshot(value);
+            life.deadline = Date.now() + RETENTION_MS;
+            life.timer = setTimeout(() => { life.deadline = 0; setSnapshot(null); setPhase('expired'); }, RETENTION_MS);
+            setSnapshot(clean); setPhase('ready');
+          }).catch((error) => { if (life.mounted) setPhase(error.code || 'failed'); });
+        }
+        clearEntrySecrets(entry);
+      } else if (!entry.error) {
+        requestJson('health').then((value) => {
+          if (!life.mounted) return;
+          if (value.version !== 'holdings-phone-v1') throw new FlowFailure('unavailable');
+          setPhase(value.configured === true ? 'initial' : 'not_configured');
+        }).catch((error) => { if (life.mounted) setPhase(error.code || 'failed'); });
+      }
+    }
+    return () => { life.mounted = false; clearTimeout(life.timer); };
+  }, [entry]);
+
+  useEffect(() => {
+    const clearLocal = (nextPhase) => {
+      lifecycle.current.deadline = 0; clearTimeout(lifecycle.current.timer);
+      setSnapshot(null); setUserId(''); setPhase(nextPhase);
+    };
+    const checkDeadline = () => {
+      if (lifecycle.current.deadline && Date.now() >= lifecycle.current.deadline) clearLocal('expired');
+    };
+    const onLeave = () => { if (lifecycle.current.deadline) clearLocal('cleared'); };
+    window.addEventListener('pageshow', checkDeadline); window.addEventListener('focus', checkDeadline);
+    document.addEventListener('visibilitychange', checkDeadline); window.addEventListener('pagehide', onLeave);
+    return () => { window.removeEventListener('pageshow', checkDeadline); window.removeEventListener('focus', checkDeadline); document.removeEventListener('visibilitychange', checkDeadline); window.removeEventListener('pagehide', onLeave); };
+  }, []);
+
+  const start = async (event) => {
+    event.preventDefault(); if (phase !== 'initial') return;
+    const expectedUserId = userId.trim(); if (!expectedUserId || expectedUserId.length > 80) return;
+    setPhase('starting'); setUserId('');
+    try {
+      if (!markHdfcFlowIntent('standalone')) throw new FlowFailure();
+      const result = await requestJson('start', { expected_user_id: expectedUserId });
+      let loginUrl = result.login_url; result.login_url = null;
+      if (!validHdfcLoginUrl(loginUrl) || !Number.isFinite(Date.parse(result.expires_at)) || Date.parse(result.expires_at) <= Date.now()) throw new FlowFailure();
+      window.location.assign(loginUrl); loginUrl = null;
+    } catch (error) { if (lifecycle.current.mounted) setPhase(error.code || 'failed'); }
+  };
+  const clear = () => {
+    requestJson('clear').catch(() => {});
+    lifecycle.current.deadline = 0; clearTimeout(lifecycle.current.timer);
+    clearEntrySecrets(entry); setSnapshot(null); setUserId(''); setPhase('initial');
+  };
+
+  if (phase === 'ready' && snapshot && Date.now() < lifecycle.current.deadline) return <SnapshotView snapshot={snapshot} onClear={clear} />;
+  return <>
+    <p className="hc-eyebrow">HDFC InvestRight · same phone</p><h1>Load a current holdings snapshot</h1>
+    <p>Sign in on this phone and view your holdings here. Sign in again to update the snapshot.</p>
+    {['checking', 'processing', 'starting'].includes(phase) && <p role="status">{phase === 'checking' ? 'Checking availability…' : phase === 'starting' ? 'Opening official HDFC sign-in…' : 'Verifying your account and loading holdings…'}</p>}
+    {phase === 'initial' && <form onSubmit={start}><label htmlFor="hc-user-id">Your HDFC client / user ID</label><input id="hc-user-id" value={userId} onChange={(event) => setUserId(event.target.value)} maxLength={80} required autoComplete="off" autoCapitalize="none" spellCheck={false} aria-describedby="hc-user-help" /><p id="hc-user-help" className="hc-small">Enter the account ID whose holdings you want to view. Your password, OTP, and consent belong only on HDFC’s official page.</p><button type="submit">Continue to HDFC</button></form>}
+    {!['checking', 'processing', 'starting', 'initial', 'cleared', 'expired'].includes(phase) && <p className="hc-notice hc-error" role="alert">{SAFE_ERRORS[phase] || SAFE_ERRORS.failed}</p>}
+    {['expired', 'cleared'].includes(phase) && <p className="hc-notice" role="status">The snapshot has been cleared from this page.</p>}
+    {!['checking', 'processing', 'starting', 'initial', 'not_configured'].includes(phase) && <a href="/holdings-connect">Start again</a>}
+    <p className="hc-small">This page does not save credentials or holdings in browser storage. A downloaded snapshot stays in your files until you delete it.</p>
+  </>;
+}
+
+const STYLES = `
+.hc-shell{min-height:100svh;background:#f4f6fa;color:#17233b;padding:clamp(18px,5vw,64px);font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;box-sizing:border-box}
+.hc-card{max-width:960px;margin:0 auto;background:#fff;border:1px solid #dce2eb;border-radius:22px;padding:clamp(22px,4vw,44px);box-shadow:0 12px 40px #1525410a}
+.hc-brand{font-weight:750;letter-spacing:-.02em;color:#244be1;margin-bottom:28px}.hc-eyebrow{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:#58708c;font-weight:650;margin:0 0 8px}
+.hc-card h1{font-size:clamp(27px,4vw,38px);line-height:1.2;margin:0 0 18px;letter-spacing:-.03em}.hc-card h2{font-size:22px;margin:0 0 16px}.hc-card p{max-width:680px}.hc-small{font-size:14px;color:#59687c}
+.hc-card form{max-width:560px;margin:26px 0}.hc-card label{display:block;font-weight:650;margin-bottom:8px}.hc-card input{box-sizing:border-box;width:100%;font:inherit;color:inherit;background:#fff;border:1px solid #a8b6c9;border-radius:10px;padding:13px 14px;min-height:48px}
+.hc-card input:focus,.hc-card button:focus-visible,.hc-table-wrap:focus{outline:3px solid #93b6ff;outline-offset:3px}.hc-code-input{font-family:ui-monospace,monospace!important;font-size:14px!important}
+.hc-card button{font:inherit;font-weight:650;color:#fff;background:#244be1;border:1px solid transparent;border-radius:10px;padding:13px 18px;min-height:48px;cursor:pointer}.hc-card button:disabled{opacity:.6;cursor:wait}.hc-card .hc-secondary{color:#244be1;background:#fff;border-color:#b3c1df}
+.hc-notice{border:1px solid #b5d4c7;border-radius:12px;padding:15px 18px;background:#f0faf5;color:#184a38}.hc-error{border-color:#e7bec0;background:#fff4f4;color:#8a2d35}.hc-pairing{margin:28px 0;padding:24px;border:1px solid #dce2eb;background:#f8faff;border-radius:16px;max-width:560px}.hc-pairing img{display:block;border-radius:10px;max-width:100%;height:auto;background:white}
+.hc-pair-code{display:block;overflow-wrap:anywhere;font:600 16px/1.7 ui-monospace,monospace;letter-spacing:.04em;background:#e9edf6;border-radius:8px;padding:12px}.hc-result-header{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.hc-table-wrap{overflow:auto;margin-top:24px;border:1px solid #dce2eb;border-radius:12px}.hc-card table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:14px}.hc-card th{background:#f3f6fb;text-align:left;color:#405572}.hc-card td,.hc-card th{padding:12px 14px;border-bottom:1px solid #e3e8f0}.hc-card tr:last-child td{border-bottom:0}.hc-visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:520px){.hc-card form>button{width:100%}.hc-pairing{padding:18px}.hc-pair-code{font-size:14px}.hc-brand{margin-bottom:22px}}
+`;
+
+export default function HdfcHoldingsConnect({ entry }) {
+  return <main className="hc-shell"><style>{STYLES}</style><section className="hc-card" aria-label="HDFC holdings snapshot">
+    <div className="hc-brand">α AlphaSeeker</div>
+    {entry.kind === 'mac' ? <><p className="hc-eyebrow">Same-phone sign-in</p><h1>Use the phone you sign in on</h1><p>The holdings snapshot appears on the same phone where you complete HDFC sign-in. You can download a dated JSON file and transfer that file to your Mac.</p><a href="/holdings-connect">Open the holdings page</a></> : <PhonePage entry={entry} />}
+  </section></main>;
+}

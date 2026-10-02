@@ -1,8 +1,54 @@
 {
-    "rewrites": [
+  "rewrites": [
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ],
+  "functions": {
+    "api/holdings-phone.js": {
+      "maxDuration": 60
+    }
+  },
+  "headers": [
+    {
+      "source": "/",
+      "headers": [
         {
-            "source": "/(.*)",
-            "destination": "/index.html"
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "no-store, private"
         }
-    ]
+      ]
+    },
+    {
+      "source": "/holdings-connect/:path*",
+      "headers": [
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "no-store, private"
+        }
+      ]
+    },
+    {
+      "source": "/api/holdings-phone",
+      "headers": [
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "no-store, private"
+        }
+      ]
+    }
+  ]
 }

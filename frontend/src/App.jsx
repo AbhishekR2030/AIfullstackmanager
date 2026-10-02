@@ -10,6 +10,14 @@ import Login from './pages/Login';
 import { restoreAuth } from './services/authStorage';
 import api from './services/api';
 import { getStoredTheme, initializeTheme, THEME_UPDATED_EVENT } from './services/theme';
+import HdfcHoldingsConnect from './pages/HdfcHoldingsConnect';
+import { captureHoldingsConnectEntry } from './services/holdingsConnectEntry';
+
+// Capture before either app mounts. Only an explicit, unexpired legacy intent
+// can enter the legacy flow; standalone and unknown callbacks stay isolated.
+const holdingsConnectEntry = typeof window === 'undefined'
+  ? { kind: 'normal' }
+  : captureHoldingsConnectEntry(window.location, window.history);
 
 // Auth Guard Component
 const ProtectedRoute = ({ children }) => {
@@ -22,7 +30,7 @@ const ProtectedRoute = ({ children }) => {
   return children;
 };
 
-function App() {
+function NormalApp() {
   const [authReady, setAuthReady] = useState(false);
 
   useEffect(() => {
@@ -86,6 +94,13 @@ function App() {
       </Routes>
     </Router>
   );
+}
+
+function App() {
+  if (holdingsConnectEntry.kind !== 'normal') {
+    return <HdfcHoldingsConnect entry={holdingsConnectEntry} />;
+  }
+  return <NormalApp />;
 }
 
 export default App;

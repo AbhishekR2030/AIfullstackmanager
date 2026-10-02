@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { Capacitor } from '@capacitor/core';
+import { markHdfcFlowIntent } from './holdingsConnectEntry';
 
 const resolveApiBaseUrl = () => {
     const configuredUrl = (import.meta.env.VITE_API_URL || '').trim();
@@ -218,6 +219,7 @@ export const getAsyncDiscoveryResults = async (jobId) => {
 
 export const getHDFCLoginUrl = async (redirectUri = null) => {
     try {
+        if (!markHdfcFlowIntent('legacy')) return null;
         const suffix = redirectUri ? `?redirect_uri=${encodeURIComponent(redirectUri)}` : '';
         const response = await api.get(`/auth/hdfc/login${suffix}`);
         return response.data.login_url;
