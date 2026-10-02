@@ -18,11 +18,15 @@ const HOLDINGS = {
   }],
 };
 
-function fixture({ authStatus = 200, auth = { accessToken: TOKEN }, holdingsStatus = 200, holdings = HOLDINGS } = {}) {
+function fixture({
+  authStatus = 200, auth = { accessToken: TOKEN }, holdingsStatus = 200, holdings = HOLDINGS,
+  holdingsBody, holdingsContentType = 'application/json', holdingsResponse, requestTimeoutMs = 20_000,
+} = {}) {
   const calls = [];
   const handler = createHoldingsPhoneHandler({
     env: { HDFC_API_KEY: KEY, HDFC_API_SECRET: SECRET },
     now: () => Date.parse('2026-10-02T11:30:00Z'),
+    requestTimeoutMs,
     fetchImpl: async (url, options) => {
       const route = new URL(url);
       calls.push({ url: route, options });
@@ -30,7 +34,13 @@ function fixture({ authStatus = 200, auth = { accessToken: TOKEN }, holdingsStat
         return new Response(JSON.stringify(auth), { status: authStatus });
       }
       assert.equal(route.pathname, '/oapi/v1/portfolio/holdings');
-      return new Response(JSON.stringify(holdings), { status: holdingsStatus });
+      if (holdingsResponse) return holdingsResponse();
+      const body = holdingsBody === undefined ? JSON.stringify(holdings) : holdingsBody;
+      const bytes = typeof body === 'string' ? new TextEncoder().encode(body) : body;
+      return new Response(bytes, {
+        status: holdingsStatus,
+        headers: holdingsContentType === null ? {} : { 'Content-Type': holdingsContentType },
+      });
     },
   });
   async function invoke(body, cookie) {
@@ -68,12 +78,15 @@ function assertCleared(response) {
 
 function assertNoPrivateValues(value) {
   const serialized = JSON.stringify(value);
-  for (const forbidden of [KEY, SECRET, TOKEN, REQUEST_TOKEN, PRIVATE_MARKER, 'user_id', 'account_verified']) {
+  for (const forbidden of [KEY, SECRET, TOKEN, REQUEST_TOKEN, PRIVATE_MARKER, 'account_verified']) {
     assert.equal(serialized.includes(forbidden), false, 'private or obsolete fields must not reach the phone');
+  }
+  for (const field of ['user_id', 'account_id', 'client_id', 'account_verified']) {
+    assert.equal(Object.hasOwn(value, field), false, 'account identifiers must not reach the phone');
   }
 }
 
-function assertProviderContract(calls) {
+function assertProviderContract(calls, token = TOKEN) {
   assert.deepEqual(calls.map(({ url, options }) => [options.method, url.origin, url.pathname]), [
     ['POST', 'https://developer.hdfcsec.com', '/oapi/v1/access-token'],
     ['GET', 'https://developer.hdfcsec.com', '/oapi/v1/portfolio/holdings'],
@@ -83,7 +96,7 @@ function assertProviderContract(calls) {
   assert.deepEqual(JSON.parse(auth.options.body), { apiSecret: SECRET });
   assert.equal(auth.options.headers['Content-Type'], 'application/json');
   assert.deepEqual([...holdings.url.searchParams], [['api_key', KEY]]);
-  assert.equal(holdings.options.headers.Authorization, `Bearer ${TOKEN}`);
+  assert.equal(holdings.options.headers.Authorization, `Bearer ${token}`);
   assert.equal(holdings.options.headers['x-api-key'], KEY);
   assert.ok(holdings.options.headers['User-Agent']);
   assert.equal(holdings.options.body, undefined);
@@ -146,23 +159,179 @@ for (const authStatus of [401, 201]) {
   });
 }
 
-test('holdings HTTP 422 reports holdings rather than profile and clears the session safely', async () => {
+test('holdings HTTP 422 validation triples reach the real formatter with fixed labels and redacted private context', async () => {
   const flow = fixture({
     holdingsStatus: 422,
-    holdings: { detail: [{
-      loc: ['header', 'Authorization'], type: 'missing', msg: PRIVATE_MARKER,
-      input: TOKEN, ctx: { api_key: KEY, user_id: PRIVATE_MARKER },
-    }] },
+    holdings: { detail: [
+      { loc: ['header', 'Authorization'], type: 'missing', msg: PRIVATE_MARKER,
+        input: TOKEN, ctx: { api_key: KEY, user_id: PRIVATE_MARKER } },
+      { loc: ['header', 'x-api-key'], type: 'string_type', msg: SECRET, input: KEY },
+      { loc: ['query', 'user_id'], type: 'value_error.missing', input: PRIVATE_MARKER },
+    ] },
   });
   const cookie = await begin(flow);
   const failure = await flow.invoke({ action: 'callback', request_token: REQUEST_TOKEN }, cookie);
   assert.equal(failure.statusCode, 502);
   const safe = safeHoldingsError(failure.body.error);
-  assert.equal(safe.reference, 'holdings.http_status.HTTP422');
+  assert.equal(safe.reference, 'holdings.http_status.HTTP422.R.classified.M.json.E.unknown'
+    + '.V.header.authorization.missing.V.header.x_api_key.invalid.V.query.user_id.missing');
   assert.equal(safe.reference.includes('profile'), false);
+  assert.equal(Object.hasOwn(failure.body.error.diagnostic, 'format_flags'), false);
   assertProviderContract(flow.calls);
   assert.throws(() => validateHoldingsSnapshot(failure.body), /Invalid holdings snapshot/);
   assertNoPrivateValues(failure.body);
   assertNoPrivateValues(safe);
   assertCleared(failure);
+});
+
+const BASE_422 = 'holdings.http_status.HTTP422';
+const FALSE_FLAGS = '.F.key_space.false.F.token_space.false.F.bearer_prefix.false.F.token_conflict.false';
+
+async function verify422(flow, suffix, { token = TOKEN, flags = false } = {}) {
+  const cookie = await begin(flow);
+  const failure = await flow.invoke({ action: 'callback', request_token: REQUEST_TOKEN }, cookie);
+  assert.equal(failure.statusCode, 502);
+  assert.equal(failure.body.error.code, 'provider_failed');
+  assert.deepEqual(Object.keys(failure.body), ['error']);
+  assert.deepEqual(Object.keys(failure.body.error).sort(), ['code', 'diagnostic', 'message']);
+  const diagnostic = failure.body.error.diagnostic;
+  const permittedFields = new Set([
+    'stage', 'reason', 'http_status', 'error_outcome', 'response_format',
+    'error_category', 'provider_code', 'validation', 'format_flags',
+  ]);
+  assert.ok(Object.keys(diagnostic).every(field => permittedFields.has(field)));
+  assert.equal(diagnostic.stage, 'holdings');
+  assert.equal(diagnostic.reason, 'http_status');
+  assert.equal(diagnostic.http_status, 422);
+  const safe = safeHoldingsError(failure.body.error);
+  assert.equal(safe.reference, BASE_422 + suffix);
+  assert.equal(safe.reference.includes('profile'), false);
+  assert.equal(Object.hasOwn(diagnostic, 'format_flags'), flags);
+  assertProviderContract(flow.calls, token);
+  assert.throws(() => validateHoldingsSnapshot(failure.body), /Invalid holdings snapshot/);
+  for (const field of ['holdings', 'holdings_count', 'snapshot_version', 'account_authenticated']) {
+    assert.equal(Object.hasOwn(failure.body, field), false, 'an HTTP422 is never a holdings snapshot');
+  }
+  assertNoPrivateValues(failure.body);
+  assertNoPrivateValues(safe);
+  assertCleared(failure);
+  return { failure, safe };
+}
+
+// These two exact shapes are public user reports on the official forum. Their
+// original contexts are HTTP401 token exchange/WebSocket, not guaranteed REST422.
+for (const [label, body] of [
+  ['forum23 authorization message', { error: 'authorization not provided' }],
+  ['forum28 displayMessage', { displayMessage: 'Full authentication is required to access this resource' }],
+]) {
+  test(`${label} is classified without returning the provider message`, async () => {
+    const { failure, safe } = await verify422(fixture({ holdingsStatus: 422, holdings: body }),
+      '.R.classified.M.json.E.authentication_required');
+    const publishedMessage = Object.values(body)[0];
+    assert.equal(JSON.stringify(failure.body).includes(publishedMessage), false);
+    assert.equal(JSON.stringify(safe).includes(publishedMessage), false);
+  });
+}
+
+// Code-field envelopes below are synthetic compatibility shapes. Staff discussed
+// the literal60014 but did not publish its JSON envelope or establish empty data.
+for (const [label, body] of [
+  ['numeric code', { code: 60014, message: PRIVATE_MARKER }],
+  ['nested string code', { error: { errorCode: '60014', description: PRIVATE_MARKER, input: TOKEN } }],
+]) {
+  test(`compatibility ${label} reports literal60014 and never claims an empty portfolio`, async () => {
+    const { failure } = await verify422(fixture({ holdingsStatus: 422, holdings: body }),
+      '.R.classified.M.json.E.unknown.C.60014');
+    assert.equal(failure.body.error.diagnostic.error_category, 'unknown');
+  });
+}
+
+// Synthetic compatibility recognizers exercise fixed categories and supported
+// envelope locations. They are not claims about the current provider payload.
+const CATEGORY_CASES = [
+  ['API-key error object', { error: { message: 'Invalid API key' } }, 'api_key_rejected'],
+  ['token data object', { data: { error_message: 'Token expired' } }, 'access_token_rejected'],
+  ['missing-parameter errors array', { errors: [{ description: 'Missing required parameter' }] }, 'missing_parameter'],
+  ['invalid request root', { message: 'Bad request' }, 'invalid_request'],
+  ['access denied root', { errorMessage: 'Permission denied' }, 'access_denied'],
+  ['IP JSON string', 'IP address is not whitelisted', 'ip_restricted'],
+  ['rate limit detail string', { detail: 'Too many requests' }, 'rate_limited'],
+  ['portfolio data array', { data: [{ displayMessage: 'No portfolio holdings' }] }, 'portfolio_unavailable'],
+  ['unprocessable root', { error_message: 'Unprocessable entity' }, 'unprocessable_request'],
+];
+for (const [label, body, category] of CATEGORY_CASES) {
+  test(`synthetic ${label} reaches the fixed ${category} frontend category`, async () => {
+    await verify422(fixture({ holdingsStatus: 422, holdings: body }), `.R.classified.M.json.E.${category}`);
+  });
+}
+
+test('recognized plain-text message is classified while retaining its text MIME category', async () => {
+  await verify422(fixture({ holdingsStatus: 422, holdingsBody: 'Invalid or expired token', holdingsContentType: 'text/plain' }),
+    '.R.classified.M.text.E.access_token_rejected');
+});
+
+test('recognized JSON under absent MIME remains classified without exposing headers', async () => {
+  await verify422(fixture({ holdingsStatus: 422, holdings: { message: 'Authentication required' }, holdingsContentType: null }),
+    '.R.classified.M.absent.E.authentication_required');
+});
+
+test('unknown nested body exposes only booleans and preserves selected token bytes and camel-first precedence', async () => {
+  const selectedToken = `Bearer ${TOKEN} `;
+  const flow = fixture({
+    auth: { accessToken: selectedToken, access_token: `${TOKEN}-alternate` },
+    holdingsStatus: 422,
+    holdings: { message: PRIVATE_MARKER, data: { user_id: PRIVATE_MARKER }, code: '60015' },
+  });
+  const { failure } = await verify422(flow,
+    '.R.unknown.M.json.E.unknown.F.key_space.false.F.token_space.true.F.bearer_prefix.true.F.token_conflict.true',
+    { token: selectedToken, flags: true });
+  assert.deepEqual(failure.body.error.diagnostic.format_flags, {
+    api_key_has_outer_whitespace: false, token_has_whitespace: true,
+    token_has_bearer_prefix: true, top_level_token_fields_conflict: true,
+  });
+  assert.equal(JSON.stringify(failure.body).includes('60015'), false);
+});
+
+const UNINFORMATIVE_CASES = [
+  ['unknown JSON', { holdings: { message: PRIVATE_MARKER, input: TOKEN, ctx: { api_key: KEY } } }, 'unknown', 'json'],
+  ['conflicting categories', { holdings: { message: 'Invalid API key', description: 'Token expired' } }, 'unknown', 'json'],
+  ['unsupported validation', { holdings: { detail: [{ loc: ['private', PRIVATE_MARKER], type: 'private-type', input: TOKEN }] } }, 'unknown', 'json'],
+  ['HTML page', { holdingsBody: `<html>${PRIVATE_MARKER}${TOKEN}</html>`, holdingsContentType: 'text/html' }, 'non_json', 'html'],
+  ['unknown plain text', { holdingsBody: `${PRIVATE_MARKER} ${TOKEN}`, holdingsContentType: 'text/plain' }, 'non_json', 'text'],
+  ['invalid advertised JSON', { holdingsBody: `{${PRIVATE_MARKER}`, holdingsContentType: 'application/json' }, 'invalid_json', 'json'],
+  ['invalid UTF8', { holdingsBody: new Uint8Array([0xff]), holdingsContentType: 'application/json' }, 'invalid_utf8', 'json'],
+  ['empty body', { holdingsBody: new Uint8Array(), holdingsContentType: null }, 'empty', 'absent'],
+  ['oversized body', { holdingsBody: new Uint8Array(16_385).fill(120), holdingsContentType: 'application/json' }, 'size', 'json'],
+  ['missing readable body', { holdingsBody: null, holdingsContentType: 'application/json' }, 'read_error', 'json'],
+  ['mislabeled JSON object', { holdings: { detail: [] }, holdingsContentType: 'application/octet-stream' }, 'unknown', 'other'],
+];
+for (const [label, options, outcome, format] of UNINFORMATIVE_CASES) {
+  test(`${label} preserves HTTP422 through the actual formatter and exposes no raw evidence`, async () => {
+    await verify422(fixture({ holdingsStatus: 422, ...options }),
+      `.R.${outcome}.M.${format}.E.unknown${FALSE_FLAGS}`, { flags: true });
+  });
+}
+
+test('optional body read error cannot become a transport failure or a snapshot', async () => {
+  const flow = fixture({
+    holdingsResponse: () => new Response(new ReadableStream({
+      start(controller) { controller.error(new Error(`${PRIVATE_MARKER} ${TOKEN}`)); },
+    }), { status: 422, headers: { 'Content-Type': 'application/json' } }),
+  });
+  await verify422(flow, `.R.read_error.M.json.E.unknown${FALSE_FLAGS}`, { flags: true });
+});
+
+test('earlier request deadline bounds a hung optional body while preserving the original holdings422', async () => {
+  const flow = fixture({
+    requestTimeoutMs: 25,
+    holdingsResponse: () => new Response(new ReadableStream({
+      pull() { return new Promise(() => {}); },
+    }), { status: 422, headers: { 'Content-Type': 'application/json' } }),
+  });
+  const keepAlive = setTimeout(() => {}, 500);
+  try {
+    await verify422(flow, `.R.timeout.M.json.E.unknown${FALSE_FLAGS}`, { flags: true });
+  } finally {
+    clearTimeout(keepAlive);
+  }
 });

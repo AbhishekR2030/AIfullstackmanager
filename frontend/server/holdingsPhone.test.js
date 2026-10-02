@@ -44,7 +44,7 @@ function fakeProvider({ holdings, responseOverrides = [] } = {}) {
 
 test('health reports configured boolean and never exposes server values', async () => {
   const result = await invoke(create(), { method: 'GET' });
-  assert.deepEqual(result.body, { version: 'holdings-phone-v2', configured: true, diagnostics_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', profile_verification: false });
+  assert.deepEqual(result.body, { version: 'holdings-phone-v2', configured: true, diagnostics_version: 1, holdings_diagnostics_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', profile_verification: false });
   assert.equal(result.headers['cache-control'], 'no-store, private');
   assert.equal(result.headers['referrer-policy'], 'no-referrer');
   for (const value of Object.values(ENV)) assert.ok(!result.raw.includes(value));
@@ -429,9 +429,304 @@ test('holdings failures never fall back to profile, retry or change authenticati
     const cookie = await started(handler);
     const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
     assert.equal(result.status, 502);
-    assert.deepEqual(result.body.error.diagnostic, { stage: 'holdings', reason: 'http_status', http_status: status });
+    assert.equal(result.body.error.diagnostic.stage, 'holdings');
+    assert.equal(result.body.error.diagnostic.reason, 'http_status');
+    assert.equal(result.body.error.diagnostic.http_status, status);
+    if (status !== 422) assert.deepEqual(result.body.error.diagnostic, { stage: 'holdings', reason: 'http_status', http_status: status });
     assert.equal(fake.calls.length, 2);
     assert.equal(fake.calls[1].options.headers.Authorization, 'Bearer synthetic-access-token');
     for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
   }
+});
+
+const EMPTY_FLAGS = Object.freeze({ api_key_has_outer_whitespace: false, token_has_whitespace: false, token_has_bearer_prefix: false, top_level_token_fields_conflict: false });
+const HTTP422 = Object.freeze({ stage: 'holdings', reason: 'http_status', http_status: 422 });
+
+function errorResponse(payload, { contentType = 'application/json', raw = false } = {}) {
+  const body = raw ? payload : JSON.stringify(payload);
+  const headers = contentType === null ? {} : { 'Content-Type': contentType };
+  return new Response(typeof body === 'string' ? new TextEncoder().encode(body) : body, { status: 422, headers });
+}
+
+async function callback422(response, { auth = { accessToken: 'synthetic-access-token' }, ...options } = {}) {
+  const fake = fakeProvider({ responseOverrides: [new Response(JSON.stringify(auth)), response] });
+  const handler = create(fake.fetchImpl, options);
+  const cookie = await started(handler);
+  const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
+  assert.equal(result.status, 502);
+  assert.equal(result.body.error.code, 'provider_failed');
+  assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
+  assert.equal(result.body.error.diagnostic.stage, 'holdings');
+  assert.equal(result.body.error.diagnostic.reason, 'http_status');
+  assert.equal(result.body.error.diagnostic.http_status, 422);
+  assert.deepEqual(fake.calls.map(({ url, options: request }) => [request.method, new URL(url).origin + new URL(url).pathname]), [['POST', ENDPOINTS.auth], ['GET', ENDPOINTS.holdings]]);
+  for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
+  return { ...result, calls: fake.calls };
+}
+
+test('whole callback classifies published static authentication messages without exposing provider fields', async () => {
+  for (const payload of [
+    { error: 'authorization not provided', user_id: 'SYNTHETIC-PRIVATE-ID' },
+    { displayMessage: 'Full authentication is required to access this resource', api_key: ENV.HDFC_API_KEY },
+  ]) {
+    const result = await callback422(errorResponse(payload));
+    assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'authentication_required' });
+    assert.equal(result.calls[1].options.headers.Authorization, 'Bearer synthetic-access-token');
+    assert.equal(result.calls[1].options.headers['x-api-key'], ENV.HDFC_API_KEY);
+    assert.deepEqual([...new URL(result.calls[1].url).searchParams], [['api_key', ENV.HDFC_API_KEY]]);
+    assert.equal(result.calls[1].options.body, undefined);
+  }
+});
+
+test('whole callback maps bounded exact messages to fixed categories only', async () => {
+  for (const [message, category] of [
+    ['INVALID  API KEY. ', 'api_key_rejected'], ['Invalid or expired access token', 'access_token_rejected'],
+    ['Missing required parameters', 'missing_parameter'], ['Bad request', 'invalid_request'],
+    ['Invalid request', 'invalid_request'], ['Malformed request', 'invalid_request'], ['Access denied', 'access_denied'],
+    ['IP address is not whitelisted', 'ip_restricted'], ['Rate limit exceeded', 'rate_limited'],
+    ['Your Portfolio Holding is Null', 'portfolio_unavailable'], ['Unprocessable entity', 'unprocessable_request'],
+  ]) {
+    const result = await callback422(errorResponse({ message, input: unsafeBody }));
+    assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: category });
+    assert.equal(result.body.holdings, undefined);
+  }
+});
+
+test('unknown, negated, dynamic and oversized messages never acquire a specific category', async () => {
+  for (const message of ['Invalid token for SYNTHETIC-PRIVATE-ID', 'Do not use Invalid API key', 'API key is not invalid', 'Invalid access token: synthetic-access-token', 'invalid', 'token', 'key', 'Unauthorized' + ' '.repeat(1024)]) {
+    const result = await callback422(errorResponse({ message, description: unsafeBody }));
+    assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
+  }
+});
+
+test('compatibility envelopes use bounded own message/code fields without recursive traversal', async () => {
+  for (const [payload, category, code] of [
+    [{ error: { errorMessage: 'Invalid token', raw: unsafeBody } }, 'access_token_rejected'],
+    [{ data: { error_message: 'Invalid API key' } }, 'api_key_rejected'],
+    [{ errors: [{ description: 'Permission denied' }] }, 'access_denied'],
+    [{ data: [{ message: 'Too many requests' }] }, 'rate_limited'],
+    [[{ displayMessage: 'Unauthorized' }], 'authentication_required'],
+    [{ code: 60014, message: 'sensitive-provider-response' }, 'unknown', '60014'],
+    [{ error: { errorCode: '60014' } }, 'unknown', '60014'],
+    [{ data: [{ error_code: 60014 }] }, 'unknown', '60014'],
+  ]) {
+    const result = await callback422(errorResponse(payload));
+    const diagnostic = { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: category };
+    if (code) diagnostic.provider_code = code;
+    assert.deepEqual(result.body.error.diagnostic, diagnostic);
+    assert.equal(result.body.holdings_count, undefined);
+  }
+  for (const payload of [
+    { code: '60014 ' }, { code: '060014' }, { code: { valueOf: 60014 } }, { code: 60015 },
+    { status: 60014, account: { code: 60014 } }, { data: { error: { code: 60014, message: 'Invalid token' } } },
+    { errors: [...Array.from({ length: 8 }, () => ({})), { code: 60014 }] },
+  ]) {
+    const result = await callback422(errorResponse(payload));
+    assert.equal(result.body.error.diagnostic.provider_code, undefined);
+    assert.equal(result.body.error.diagnostic.error_outcome, 'unknown');
+    assert.deepEqual(result.body.error.diagnostic.format_flags, EMPTY_FLAGS);
+  }
+});
+
+test('conflicting recognized categories become unknown without leaking message text', async () => {
+  const result = await callback422(errorResponse({ message: 'Invalid API key', error: { message: 'Invalid token' }, code: 60014, input: unsafeBody }));
+  assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'unknown', provider_code: '60014' });
+  const withoutCode = await callback422(errorResponse({ message: 'Invalid API key', error: { message: 'Invalid token' } }));
+  assert.deepEqual(withoutCode.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
+});
+
+test('whole callback validation preserves only finite location/field/kind labels', async () => {
+  const detail = [
+    { loc: ['header', 'X-API-KEY'], type: 'missing', msg: unsafeBody, input: unsafeBody, ctx: unsafeBody },
+    { loc: ['header', 'Authorization'], type: 'value_error.missing' },
+    { loc: ['header', 'User-Agent'], type: 'string_type' },
+    { loc: ['header', 'Content-Type'], type: 'value_error' },
+    { loc: ['query', 'api_key'], type: 'missing' },
+    { loc: ['body', 'SYNTHETIC-PRIVATE-ID'], type: 'int_parsing' },
+    { loc: ['body', 'access_token', 0], type: 'string_type' },
+    { loc: ['header', 'api-secret'], type: 'missing' },
+    { loc: ['query', 'API_KEY'], type: 'missing' },
+    { loc: ['header', 'authorization'], type: 'missing' },
+    { loc: ['private_profile', 'api_key'], type: 'missing' },
+    { loc: ['query', 'token'], type: 'sensitive-provider-response' },
+    { loc: ['body', { api_key: ENV.HDFC_API_KEY }], type: 'missing' },
+  ];
+  const result = await callback422(errorResponse({ detail, user_id: 'SYNTHETIC-PRIVATE-ID' }));
+  assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'unknown', validation: [
+    { location: 'header', field: 'x_api_key', kind: 'missing' },
+    { location: 'header', field: 'authorization', kind: 'missing' },
+    { location: 'header', field: 'user_agent', kind: 'invalid' },
+    { location: 'header', field: 'content_type', kind: 'invalid' },
+    { location: 'query', field: 'api_key', kind: 'missing' },
+    { location: 'body', field: 'other', kind: 'invalid' },
+    { location: 'header', field: 'other', kind: 'missing' },
+    { location: 'query', field: 'other', kind: 'missing' },
+  ] });
+});
+
+test('validation first32 limit is global across root and supported child records', async () => {
+  const issue = { loc: ['query', 'api_key'], type: 'missing' };
+  const unsupported = { loc: ['body', ['private']], type: 'missing' };
+  const ignored = await callback422(errorResponse({ detail: Array.from({ length: 32 }, () => unsupported), error: { detail: [issue] } }));
+  assert.equal(ignored.body.error.diagnostic.error_outcome, 'unknown');
+  assert.equal(ignored.body.error.diagnostic.validation, undefined);
+  const included = await callback422(errorResponse({ detail: Array.from({ length: 31 }, () => unsupported), error: { detail: [issue, { loc: ['query', 'request_token'], type: 'missing' }] } }));
+  assert.deepEqual(included.body.error.diagnostic.validation, [{ location: 'query', field: 'api_key', kind: 'missing' }]);
+  assert.equal(included.body.error.diagnostic.format_flags, undefined);
+});
+
+test('error MIME and read/parse outcomes are explicit while base422 survives', async () => {
+  for (const [response, format, outcome] of [
+    [errorResponse({ private_profile: unsafeBody }), 'json', 'unknown'],
+    [errorResponse([], { contentType: 'application/problem+json; charset=utf-8' }), 'json', 'unknown'],
+    [errorResponse('<html>sensitive-provider-response</html>', { contentType: 'Text/HTML; charset=utf-8', raw: true }), 'html', 'non_json'],
+    [errorResponse('sensitive-provider-response', { contentType: 'text/plain', raw: true }), 'text', 'non_json'],
+    [errorResponse('{', { raw: true }), 'json', 'invalid_json'],
+    [errorResponse(new Uint8Array([0xc3, 0x28]), { raw: true }), 'json', 'invalid_utf8'],
+    [errorResponse('', { contentType: null, raw: true }), 'absent', 'empty'],
+    [errorResponse('  ', { contentType: 'application/octet-stream', raw: true }), 'other', 'empty'],
+    [errorResponse('{}', { contentType: null, raw: true }), 'absent', 'unknown'],
+    [errorResponse('{}', { contentType: 'text/html', raw: true }), 'html', 'unknown'],
+    [errorResponse('x'.repeat(16385), { raw: true }), 'json', 'size'],
+    [new Response(null, { status: 422 }), 'absent', 'read_error'],
+  ]) {
+    const result = await callback422(response);
+    assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: format, error_outcome: outcome, error_category: 'unknown', format_flags: EMPTY_FLAGS });
+  }
+});
+
+test('plain and JSON scalar exact messages classify even with missing or mislabeled MIME', async () => {
+  for (const response of [
+    errorResponse('Unauthorized', { raw: true, contentType: null }),
+    errorResponse('  Authentication\n required! ', { raw: true, contentType: 'text/plain' }),
+    errorResponse('Invalid token', { contentType: 'text/html' }),
+  ]) {
+    const result = await callback422(response);
+    assert.equal(result.body.error.diagnostic.error_outcome, 'classified');
+    assert.equal(result.body.error.diagnostic.format_flags, undefined);
+  }
+});
+
+test('exact16KiB complete error body is accepted but stream crossing limit is size', async () => {
+  const exact = await callback422(errorResponse('{}' + ' '.repeat(16382), { raw: true }));
+  assert.equal(exact.body.error.diagnostic.error_outcome, 'unknown');
+  let cancelled = 0;
+  const response = { status: 422, headers: new Headers({ 'Content-Type': 'application/json' }), body: { getReader() {
+    let reads = 0;
+    return { async read() { reads += 1; return { done: false, value: new Uint8Array(reads === 1 ? 10000 : 6385) }; }, cancel() { cancelled += 1; return Promise.resolve(); } };
+  } } };
+  const oversized = await callback422(response);
+  assert.equal(oversized.body.error.diagnostic.error_outcome, 'size');
+  assert.equal(cancelled, 1);
+});
+
+test('optional reader failures and hung/rejecting cancellation preserve base422', async () => {
+  for (const cancellation of [() => new Promise(() => {}), () => Promise.reject(new Error(unsafeBody)), () => { throw new Error(unsafeBody); }]) {
+    const response = { status: 422, headers: new Headers(), body: { getReader() { return { read() { throw new Error(unsafeBody); }, cancel: cancellation }; } } };
+    const result = await callback422(response);
+    assert.equal(result.body.error.diagnostic.error_outcome, 'read_error');
+  }
+  const getReaderFailure = await callback422({ status: 422, headers: new Headers(), body: { getReader() { throw new Error(unsafeBody); } } });
+  assert.equal(getReaderFailure.body.error.diagnostic.error_outcome, 'read_error');
+});
+
+test('zero-length error chunks cannot starve deadline or grow unbounded', async () => {
+  let reads = 0;
+  const response = { status: 422, headers: new Headers(), body: { getReader() { return { async read() { reads += 1; return { done: false, value: new Uint8Array() }; }, cancel() { return Promise.resolve(); } }; } } };
+  const result = await callback422(response);
+  assert.equal(result.body.error.diagnostic.error_outcome, 'read_error');
+  assert.equal(reads, 33);
+});
+
+test('earlier request/callback deadlines preserve422 and cancel optional reader', async () => {
+  for (const options of [{ requestTimeoutMs: 5, callbackTimeoutMs: 500 }, { requestTimeoutMs: 500, callbackTimeoutMs: 5 }]) {
+    let cancelled = 0;
+    const response = { status: 422, headers: new Headers(), body: { getReader() { return { read() { return new Promise(() => {}); }, cancel() { cancelled += 1; return new Promise(() => {}); } }; } } };
+    const result = await callback422(response, options);
+    assert.equal(result.body.error.diagnostic.error_outcome, 'timeout');
+    assert.equal(cancelled, 1);
+  }
+});
+
+test('optional error reader enforces actual two-second local budget', async () => {
+  const response = { status: 422, headers: new Headers(), body: { getReader() { return { read() { return new Promise(() => {}); }, cancel() { return new Promise(() => {}); } }; } } };
+  const begin = performance.now();
+  const result = await callback422(response, { requestTimeoutMs: 10000, callbackTimeoutMs: 10000 });
+  assert.equal(result.body.error.diagnostic.error_outcome, 'timeout');
+  assert.ok(performance.now() - begin >= 1900);
+  assert.ok(performance.now() - begin < 4000);
+});
+
+test('auth422 and other holdings failures never read optional provider error body', async () => {
+  let bodyReads = 0;
+  const response = status => ({ status, body: { getReader() { bodyReads += 1; throw new Error(unsafeBody); } } });
+  const authFake = fakeProvider({ responseOverrides: [response(422)] });
+  const authHandler = create(authFake.fetchImpl);
+  const cookie = await started(authHandler);
+  const authResult = await invoke(authHandler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
+  assert.deepEqual(authResult.body.error.diagnostic, { stage: 'token_exchange', reason: 'http_status', http_status: 422 });
+  assert.equal(authFake.calls.length, 1);
+  for (const status of [401, 403, 404, 500]) {
+    const fake = fakeProvider({ responseOverrides: [undefined, response(status)] });
+    const handler = create(fake.fetchImpl);
+    const activeCookie = await started(handler);
+    const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie: activeCookie } });
+    assert.deepEqual(result.body.error.diagnostic, { stage: 'holdings', reason: 'http_status', http_status: status });
+  }
+  assert.equal(bodyReads, 0);
+});
+
+test('uninformative422 reports only exact gated format booleans and preserves token precedence/bytes', async () => {
+  const auth = { accessToken: 'Bearer synthetic-access-token', access_token: 'different-synthetic-access-token' };
+  const env = { ...ENV, HDFC_API_KEY: ' synthetic-api-key ' };
+  const result = await callback422(errorResponse({ private_profile: unsafeBody }), { auth, env });
+  assert.deepEqual(result.body.error.diagnostic.format_flags, { api_key_has_outer_whitespace: true, token_has_whitespace: true, token_has_bearer_prefix: true, top_level_token_fields_conflict: true });
+  assert.equal(result.calls[1].options.headers.Authorization, 'Bearer Bearer synthetic-access-token');
+  assert.equal(result.calls[1].options.headers['x-api-key'], env.HDFC_API_KEY);
+  assert.equal(new URL(result.calls[1].url).searchParams.get('api_key'), env.HDFC_API_KEY);
+  for (const snakeToken of [undefined, '', ' ', 123, { value: 'private' }, 'synthetic-access-token']) {
+    const fixture = await callback422(errorResponse({}), { auth: { accessToken: 'synthetic-access-token', access_token: snakeToken } });
+    assert.deepEqual(fixture.body.error.diagnostic.format_flags, EMPTY_FLAGS);
+  }
+  const informative = await callback422(errorResponse({ message: 'Invalid token' }), { auth, env });
+  assert.equal(informative.body.error.diagnostic.format_flags, undefined);
+});
+
+test('FlowError reconstructs own fixed optional data without executing getters or forwarding extras', () => {
+  let getterCalls = 0;
+  const diagnostic = { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', raw: unsafeBody,
+    get provider_code() { getterCalls += 1; return '60014'; },
+    format_flags: { token_has_bearer_prefix: true, api_key_has_outer_whitespace: 'true', token_has_whitespace: 1, get top_level_token_fields_conflict() { getterCalls += 1; return true; }, raw: unsafeBody },
+  };
+  assert.deepEqual(new FlowError('provider_failed', 502, diagnostic).diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: { token_has_bearer_prefix: true } });
+  const item = { location: 'query', field: 'api_key', kind: 'missing', msg: unsafeBody, get raw() { getterCalls += 1; return unsafeBody; } };
+  const validation = [item, { get location() { getterCalls += 1; return 'header'; }, field: 'authorization', kind: 'missing' }];
+  Object.defineProperty(validation, '2', { get() { getterCalls += 1; return item; }, configurable: true });
+  const cleaned = new FlowError('provider_failed', 502, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'unknown', validation, format_flags: EMPTY_FLAGS }).diagnostic;
+  assert.deepEqual(cleaned.validation, [{ location: 'query', field: 'api_key', kind: 'missing' }]);
+  assert.equal(cleaned.format_flags, undefined);
+  assert.equal(getterCalls, 0);
+  assert.equal(new FlowError('provider_failed', 502, { ...HTTP422, provider_code: 60014 }).diagnostic.provider_code, undefined);
+  assert.deepEqual(new FlowError('provider_failed', 502, { stage: 'token_exchange', reason: 'http_status', http_status: 422, response_format: 'json', error_outcome: 'classified', error_category: 'access_denied' }).diagnostic, { stage: 'token_exchange', reason: 'http_status', http_status: 422 });
+});
+
+test('concurrent callbacks keep optional diagnostics isolated and make no logs', async () => {
+  let logs = 0;
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = () => { logs += 1; };
+  console.error = () => { logs += 1; };
+  try {
+    const [first, second] = await Promise.all([
+      callback422(errorResponse({ message: 'Invalid API key', private_profile: unsafeBody })),
+      callback422(errorResponse({ code: 60014, private_profile: unsafeBody }), { auth: { accessToken: 'Bearer synthetic-access-token', access_token: 'different-synthetic-access-token' } }),
+    ]);
+    assert.equal(first.body.error.diagnostic.error_category, 'api_key_rejected');
+    assert.equal(first.body.error.diagnostic.provider_code, undefined);
+    assert.equal(second.body.error.diagnostic.error_category, 'unknown');
+    assert.equal(second.body.error.diagnostic.provider_code, '60014');
+    assert.equal(first.body.error.diagnostic.format_flags, undefined);
+    assert.equal(second.body.error.diagnostic.format_flags, undefined);
+    assert.equal(logs, 0);
+  } finally { console.log = originalLog; console.error = originalError; }
 });

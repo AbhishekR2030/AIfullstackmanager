@@ -276,9 +276,9 @@ test('only the first eight input positions are inspected and the ninth cannot fi
   assert.equal(ninthReads, 0);
 });
 
-test('validation requires the exact profile HTTP-status context and a numeric 422', () => {
+test('legacy validation retains numeric422 and excludes stages outside profile or holdings', () => {
   const values = [issue()];
-  for (const stage of STAGES.filter((value) => value !== 'profile')) {
+  for (const stage of STAGES.filter((value) => value !== 'profile' && value !== 'holdings')) {
     assert.equal(validationError(values, { stage }).reference, `${stage}.http_status.HTTP422`);
   }
   for (const reason of REASONS.filter((value) => value !== 'http_status')) {
@@ -402,4 +402,163 @@ test('raw validation messages, values, IDs, URLs and extra fields never appear i
   assert.deepEqual(result, validationError([value]));
   assertSafeShape(result);
   assert.equal(reads, 0);
+});
+
+const HOLDINGS_422_REFERENCE = 'holdings.http_status.HTTP422';
+const OUTCOMES = ['classified', 'unknown', 'non_json', 'invalid_json', 'invalid_utf8', 'empty', 'size', 'timeout', 'read_error'];
+const FORMATS = ['json', 'html', 'text', 'other', 'absent'];
+const CATEGORIES = ['authentication_required', 'api_key_rejected', 'access_token_rejected', 'missing_parameter', 'invalid_request', 'access_denied', 'ip_restricted', 'rate_limited', 'portfolio_unavailable', 'unprocessable_request', 'unknown'];
+const FLAGS = {
+  api_key_has_outer_whitespace: 'key_space', token_has_whitespace: 'token_space',
+  token_has_bearer_prefix: 'bearer_prefix', top_level_token_fields_conflict: 'token_conflict',
+};
+
+function holdingsError(optional = {}, context = {}) {
+  return safeHoldingsError({ code: 'provider_failed', diagnostic: { stage: 'holdings', reason: 'http_status', http_status: 422, ...optional, ...context } });
+}
+
+test('holdings422 observations accept only the fixed outcome, format and category catalogs', () => {
+  for (const [field, marker, values] of [['error_outcome', 'R', OUTCOMES], ['response_format', 'M', FORMATS], ['error_category', 'E', CATEGORIES]]) {
+    for (const value of values) {
+      const result = holdingsError({ [field]: value });
+      assert.equal(result.reference, `${HOLDINGS_422_REFERENCE}.${marker}.${value}`);
+      assertSafeShape(result);
+    }
+    for (const value of [RAW, 'constructor', '__proto__', new String(values[0]), null, true, 0, [], {}, values[0].toUpperCase()]) {
+      assert.equal(holdingsError({ [field]: value }).reference, HOLDINGS_422_REFERENCE);
+    }
+  }
+});
+
+test('holdings422 suffix order is stable and code60014 does not claim an empty successful snapshot', () => {
+  const result = holdingsError({
+    response_format: 'json', error_outcome: 'classified', error_category: 'unknown',
+    provider_code: '60014', validation: [issue('header', 'x_api_key', 'missing')],
+    format_flags: { token_has_whitespace: true }, holdings_count: 0, holdings: [], message: RAW,
+  });
+  assert.equal(result.reference, `${HOLDINGS_422_REFERENCE}.R.classified.M.json.E.unknown.C.60014.V.header.x_api_key.missing`);
+  assert.deepEqual(Object.keys(result).sort(), ['code', 'message', 'reference']);
+  assert.equal(result.message, holdingsError().message);
+  assert.doesNotMatch(result.message, /empty|no holdings|success|portfolio.*null/iu);
+});
+
+test('provider code accepts only the canonical60014 string without coercion or partial matching', () => {
+  let conversions = 0;
+  const wrapped = { toString() { conversions += 1; return '60014'; }, valueOf() { conversions += 1; return 60014; } };
+  for (const provider_code of [60014, '060014', '60014.0', ' 60014', '60014 ', '60014' + RAW, new String('60014'), wrapped, [], null, true]) {
+    assert.equal(holdingsError({ provider_code }).reference, HOLDINGS_422_REFERENCE);
+  }
+  assert.equal(holdingsError({ provider_code: '60014' }).reference, HOLDINGS_422_REFERENCE + '.C.60014');
+  assert.equal(conversions, 0);
+});
+
+test('new observations are gated to holdings numeric422 and preserve legacy profile validation only', () => {
+  const optional = { error_outcome: 'unknown', response_format: 'json', error_category: 'unknown', provider_code: '60014', validation: [issue()], format_flags: { token_has_whitespace: true } };
+  for (const stage of STAGES.filter(value => value !== 'holdings')) {
+    const result = holdingsError(optional, { stage });
+    assert.equal(result.reference, `${stage}.http_status.HTTP422${stage === 'profile' ? issueSuffix(issue()) : ''}`);
+  }
+  for (const reason of REASONS.filter(value => value !== 'http_status')) {
+    assert.equal(holdingsError(optional, { reason }).reference, `holdings.${reason}.HTTP422`);
+  }
+  for (const http_status of [200, 201, 401, 403, 404, 421, 423, 500]) {
+    assert.equal(holdingsError(optional, { http_status }).reference, `holdings.http_status.HTTP${http_status}`);
+  }
+  for (const http_status of ['422', new Number(422), null, NaN]) {
+    assert.equal(holdingsError(optional, { http_status }).reference, 'holdings.http_status');
+  }
+});
+
+test('holdings validation examines first32 positions and emits at most8 unique canonical triples', () => {
+  const first = issue('header', 'x_api_key', 'missing');
+  assert.equal(holdingsError({ validation: [...Array(31).fill(null), first] }).reference, HOLDINGS_422_REFERENCE + issueSuffix(first));
+  assert.equal(holdingsError({ validation: [...Array(32).fill(null), first] }).reference, HOLDINGS_422_REFERENCE);
+  const unique = ['api_key', 'authorization', 'user_agent', 'content_type', 'access_token', 'client_id', 'client_code', 'user_id', 'request_token'].map(field => issue('header', field, 'missing'));
+  const values = [null, unique[0], unique[0], ...unique.slice(1)];
+  assert.equal(holdingsError({ validation: values }).reference, HOLDINGS_422_REFERENCE + unique.slice(0, 8).map(issueSuffix).join(''));
+  assert.equal(validationError([...Array(8).fill(null), first]).reference, PROFILE_422_REFERENCE);
+  assert.equal(validationError([first]).reference, PROFILE_422_REFERENCE);
+});
+
+test('holdings validation skips getters and unfamiliar records without hiding later safe entries', () => {
+  let reads = 0;
+  const getter = Object.defineProperty({}, 'location', { get() { reads += 1; throw new Error(RAW); } });
+  const values = [getter, Object.create(issue()), [RAW], issue('header', RAW), issue('header', 'token', RAW), issue('query', 'token', 'missing')];
+  Object.defineProperty(values, 1, { get() { reads += 1; throw new Error(RAW); } });
+  assert.equal(holdingsError({ validation: values }).reference, HOLDINGS_422_REFERENCE + '.V.query.token.missing');
+  assert.equal(reads, 0);
+  const nullIssue = Object.assign(Object.create(null), issue('header', 'x_api_key', 'invalid'));
+  const nullArray = [nullIssue]; Object.setPrototypeOf(nullArray, null);
+  assert.equal(holdingsError({ validation: nullArray }).reference, HOLDINGS_422_REFERENCE + '.V.header.x_api_key.invalid');
+});
+
+test('uninformative holdings422 accepts exact booleans in fixed flag order only', () => {
+  const flags = { api_key_has_outer_whitespace: true, token_has_whitespace: false, token_has_bearer_prefix: true, top_level_token_fields_conflict: false, unknown: RAW };
+  for (const error_outcome of OUTCOMES.filter(value => value !== 'classified')) {
+    const result = holdingsError({ error_outcome, error_category: 'unknown', format_flags: flags });
+    assert.equal(result.reference, `${HOLDINGS_422_REFERENCE}.R.${error_outcome}.E.unknown.F.key_space.true.F.token_space.false.F.bearer_prefix.true.F.token_conflict.false`);
+    assertSafeShape(result);
+  }
+  for (const value of ['true', 'false', 1, 0, null, [], {}, new Boolean(true)]) {
+    const result = holdingsError({ error_outcome: 'unknown', error_category: 'unknown', format_flags: Object.fromEntries(Object.keys(FLAGS).map(name => [name, value])) });
+    assert.equal(result.reference, HOLDINGS_422_REFERENCE + '.R.unknown.E.unknown');
+  }
+});
+
+test('format flags are suppressed when evidence is classified, informative or lacks canonical unknown metadata', () => {
+  const base = { error_outcome: 'unknown', error_category: 'unknown', format_flags: { token_has_whitespace: true } };
+  for (const overrides of [
+    { error_outcome: 'classified' }, { error_outcome: RAW }, { error_outcome: undefined },
+    { error_category: 'invalid_request' }, { error_category: undefined }, { error_category: RAW },
+    { provider_code: '60014' }, { validation: [issue()] },
+  ]) assert.doesNotMatch(holdingsError({ ...base, ...overrides }).reference, /\.F\./u);
+});
+
+test('format flag getters, inherited values and nonplain objects are ignored without executing code', () => {
+  let reads = 0;
+  const getters = {};
+  for (const name of Object.keys(FLAGS)) Object.defineProperty(getters, name, { get() { reads += 1; throw new Error(RAW); } });
+  class FlagRecord { constructor() { this.token_has_whitespace = true; } }
+  const expected = HOLDINGS_422_REFERENCE + '.R.unknown.E.unknown';
+  for (const format_flags of [getters, Object.create({ token_has_whitespace: true }), new FlagRecord(), [true], true]) {
+    assert.equal(holdingsError({ error_outcome: 'unknown', error_category: 'unknown', format_flags }).reference, expected);
+  }
+  const nullFlags = Object.assign(Object.create(null), { token_has_whitespace: false });
+  assert.equal(holdingsError({ error_outcome: 'unknown', error_category: 'unknown', format_flags: nullFlags }).reference, expected + '.F.token_space.false');
+  assert.equal(reads, 0);
+});
+
+test('optional descriptor inspection failures preserve base422 and independent safe metadata', () => {
+  const record = { stage: 'holdings', reason: 'http_status', http_status: 422, response_format: 'html', error_outcome: 'unknown', error_category: 'unknown' };
+  const diagnostic = new Proxy(record, {
+    getOwnPropertyDescriptor(target, key) {
+      if (key === 'error_outcome' || key === 'validation') throw new Error(RAW);
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+  });
+  const result = safeHoldingsError({ code: 'provider_failed', diagnostic });
+  assert.equal(result.reference, HOLDINGS_422_REFERENCE + '.M.html.E.unknown');
+  assertSafeShape(result);
+  let reads = 0;
+  for (const name of ['error_outcome', 'response_format', 'error_category', 'provider_code', 'validation', 'format_flags']) {
+    const plain = { stage: 'holdings', reason: 'http_status', http_status: 422 };
+    Object.defineProperty(plain, name, { get() { reads += 1; throw new Error(RAW); } });
+    assert.equal(safeHoldingsError({ code: 'provider_failed', diagnostic: plain }).reference, HOLDINGS_422_REFERENCE);
+  }
+  assert.equal(reads, 0);
+});
+
+test('private provider text and arbitrary metadata cannot become holdings422 references or change fixed copy', () => {
+  let conversions = 0;
+  const hostile = { toString() { conversions += 1; return RAW; } };
+  const result = holdingsError({
+    error_outcome: hostile, response_format: RAW.repeat(1024), error_category: RAW,
+    provider_code: hostile, validation: [{ ...issue('header', 'api_key', 'missing'), input: RAW, msg: RAW, ctx: { token: RAW } }],
+    format_flags: { token_has_whitespace: hostile }, message: RAW, body: RAW, url: RAW,
+    token_length: 15, token_hash: RAW, client_id: RAW, claims: { sub: RAW },
+  });
+  assert.equal(result.reference, HOLDINGS_422_REFERENCE + '.V.header.api_key.missing');
+  assert.equal(result.message, holdingsError().message);
+  assertSafeShape(result);
+  assert.equal(conversions, 0);
 });

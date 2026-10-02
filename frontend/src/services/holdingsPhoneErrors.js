@@ -10,6 +10,19 @@ const VALIDATION_FIELDS = new Set([
   'client_id', 'client_code', 'user_id', 'request_token', 'api_secret', 'token', 'other',
 ]);
 const VALIDATION_KINDS = new Set(['missing', 'invalid']);
+const RESPONSE_FORMATS = new Set(['json', 'html', 'text', 'other', 'absent']);
+const ERROR_OUTCOMES = new Set(['classified', 'unknown', 'non_json', 'invalid_json', 'invalid_utf8', 'empty', 'size', 'timeout', 'read_error']);
+const ERROR_CATEGORIES = new Set([
+  'authentication_required', 'api_key_rejected', 'access_token_rejected',
+  'missing_parameter', 'invalid_request', 'access_denied', 'ip_restricted',
+  'rate_limited', 'portfolio_unavailable', 'unprocessable_request', 'unknown',
+]);
+const FORMAT_FLAGS = Object.freeze([
+  ['api_key_has_outer_whitespace', 'key_space'],
+  ['token_has_whitespace', 'token_space'],
+  ['token_has_bearer_prefix', 'bearer_prefix'],
+  ['top_level_token_fields_conflict', 'token_conflict'],
+]);
 const MESSAGES = Object.freeze({
   not_configured: 'This holdings page needs setup before it can be used.',
   invalid_request: 'This sign-in response could not be verified. Start a new sign-in.',
@@ -32,8 +45,9 @@ function dataValue(record, key) {
 }
 
 // Optional validation metadata must not invalidate the fixed diagnostic when
-// a malformed array/item is rejected. Inspect only the first eight positions.
-function validationReference(diagnostic) {
+// a malformed array/item is rejected. Legacy profile examines eight positions;
+// holdings examines thirty-two and emits at most eight unique triples.
+function validationReference(diagnostic, maximumExamined = 8, allowXApiKey = false) {
   try {
     const issues = dataValue(diagnostic, 'validation');
     if (!Array.isArray(issues)) return '';
@@ -43,7 +57,7 @@ function validationReference(diagnostic) {
     const length = lengthDescriptor && Object.hasOwn(lengthDescriptor, 'value') ? lengthDescriptor.value : null;
     if (!Number.isSafeInteger(length) || length < 0) return '';
     const accepted = new Set();
-    for (let index = 0; index < Math.min(length, 8); index += 1) {
+    for (let index = 0; index < Math.min(length, maximumExamined) && accepted.size < 8; index += 1) {
       try {
         const descriptor = Object.getOwnPropertyDescriptor(issues, `${index}`);
         if (!descriptor || !Object.hasOwn(descriptor, 'value')) continue;
@@ -52,7 +66,7 @@ function validationReference(diagnostic) {
         const field = dataValue(issue, 'field');
         const kind = dataValue(issue, 'kind');
         if (typeof location !== 'string' || location.length > 6 || !VALIDATION_LOCATIONS.has(location)
-            || typeof field !== 'string' || field.length > 13 || !VALIDATION_FIELDS.has(field)
+            || typeof field !== 'string' || field.length > 13 || !(VALIDATION_FIELDS.has(field) || (allowXApiKey && field === 'x_api_key'))
             || typeof kind !== 'string' || kind.length > 7 || !VALIDATION_KINDS.has(kind)) continue;
         accepted.add(`.V.${location}.${field}.${kind}`);
       } catch { /* Reject this optional item without losing the fixed reference. */ }
@@ -61,6 +75,36 @@ function validationReference(diagnostic) {
   } catch {
     return '';
   }
+}
+
+function optionalDataValue(record, key) {
+  try { return dataValue(record, key); } catch { return undefined; }
+}
+
+// Optional holdings observations never replace the original HTTP422 reference.
+function holdings422Reference(diagnostic) {
+  const suppliedOutcome = optionalDataValue(diagnostic, 'error_outcome');
+  const suppliedFormat = optionalDataValue(diagnostic, 'response_format');
+  const suppliedCategory = optionalDataValue(diagnostic, 'error_category');
+  const outcome = typeof suppliedOutcome === 'string' && ERROR_OUTCOMES.has(suppliedOutcome) ? suppliedOutcome : null;
+  const format = typeof suppliedFormat === 'string' && RESPONSE_FORMATS.has(suppliedFormat) ? suppliedFormat : null;
+  const category = typeof suppliedCategory === 'string' && ERROR_CATEGORIES.has(suppliedCategory) ? suppliedCategory : null;
+  const providerCode = optionalDataValue(diagnostic, 'provider_code') === '60014' ? '60014' : null;
+  const validation = validationReference(diagnostic, 32, true);
+  let reference = '';
+  if (outcome) reference += `.R.${outcome}`;
+  if (format) reference += `.M.${format}`;
+  if (category) reference += `.E.${category}`;
+  if (providerCode) reference += `.C.${providerCode}`;
+  reference += validation;
+  if (outcome && outcome !== 'classified' && category === 'unknown' && !providerCode && !validation) {
+    const flags = optionalDataValue(diagnostic, 'format_flags');
+    for (const [name, shortName] of FORMAT_FLAGS) {
+      const value = optionalDataValue(flags, name);
+      if (typeof value === 'boolean') reference += `.F.${shortName}.${value ? 'true' : 'false'}`;
+    }
+  }
+  return reference;
 }
 
 /** Convert backend errors to fixed UI copy and enum-only diagnostic references. */
@@ -84,6 +128,9 @@ export function safeHoldingsError(value) {
       }
       if (stage === 'profile' && reason === 'http_status' && status === 422) {
         reference += validationReference(diagnostic);
+      }
+      if (stage === 'holdings' && reason === 'http_status' && status === 422) {
+        reference += holdings422Reference(diagnostic);
       }
       if (code === 'provider_failed') {
         if (stage === 'token_exchange') message = 'HDFC sign-in could not be completed. Share the reference below for help.';
