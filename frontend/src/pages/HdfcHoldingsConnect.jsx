@@ -1,19 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { clearEntrySecrets, consumeCallbackToken, markHdfcFlowIntent, validHdfcLoginUrl, validateHoldingsSnapshot } from '../services/holdingsConnectEntry';
+import { localHoldingsError, safeHoldingsError } from '../services/holdingsPhoneErrors';
 
 const API_URL = '/api/holdings-phone';
 const RETENTION_MS = 10 * 60 * 1000;
-const SAFE_ERRORS = {
-  not_configured: 'This holdings page needs owner setup before it can be used.',
-  session_expired: 'This sign-in has expired. Sign in again to load a current snapshot.',
-  account_mismatch: 'HDFC could not verify the expected account. Start again with the correct HDFC client ID.',
-  failed: 'The holdings snapshot could not be verified. Please start again.',
-  unavailable: 'The holdings service is unavailable. Please try again later.',
-};
-
 class FlowFailure extends Error {
-  constructor(code = 'failed') { super('Holdings request could not be completed.'); this.code = code; }
+  constructor(presentation = localHoldingsError('shape')) {
+    super(presentation.message);
+    this.presentation = presentation;
+  }
 }
+
+const presentationFrom = (error) => error instanceof FlowFailure ? error.presentation : localHoldingsError('shape');
 
 async function requestJson(action, payload = {}) {
   let response;
@@ -23,11 +21,11 @@ async function requestJson(action, payload = {}) {
       headers: { Accept: 'application/json', ...(action !== 'health' ? { 'Content-Type': 'application/json' } : {}) },
       ...(action !== 'health' ? { body: JSON.stringify({ action, ...payload }) } : {}),
     });
-  } catch { throw new FlowFailure('unavailable'); }
+  } catch { throw new FlowFailure(localHoldingsError('transport')); }
   let data;
-  try { data = await response.json(); } catch { throw new FlowFailure('unavailable'); }
-  if (!response.ok) throw new FlowFailure(Object.hasOwn(SAFE_ERRORS, data?.error?.code) ? data.error.code : 'failed');
-  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new FlowFailure();
+  try { data = await response.json(); } catch { throw new FlowFailure(localHoldingsError('json')); }
+  if (!response.ok) throw new FlowFailure(safeHoldingsError(data?.error));
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new FlowFailure(localHoldingsError('shape'));
   return data;
 }
 
@@ -53,7 +51,8 @@ function SnapshotView({ snapshot, onClear }) {
 }
 
 function PhonePage({ entry }) {
-  const [phase, setPhase] = useState(entry.kind === 'callback' ? (entry.error ? 'failed' : 'processing') : (entry.error ? 'failed' : 'checking'));
+  const [phase, setPhase] = useState(entry.error || (entry.kind === 'callback' && !entry.requestToken) ? 'invalid_request' : entry.kind === 'callback' ? 'processing' : 'checking');
+  const [failure, setFailure] = useState(entry.error || (entry.kind === 'callback' && !entry.requestToken) ? localHoldingsError('callback') : null);
   const [userId, setUserId] = useState('');
   const [snapshot, setSnapshot] = useState(null);
   const lifecycle = useRef({ submitted: false, mounted: false, deadline: 0, timer: null });
@@ -70,19 +69,25 @@ function PhonePage({ entry }) {
           payload.request_token = null;
           pending.then((value) => {
             if (!life.mounted) return;
-            const clean = validateHoldingsSnapshot(value);
+            let clean;
+            try { clean = validateHoldingsSnapshot(value); } catch { throw new FlowFailure(localHoldingsError('snapshot')); }
             life.deadline = Date.now() + RETENTION_MS;
             life.timer = setTimeout(() => { life.deadline = 0; setSnapshot(null); setPhase('expired'); }, RETENTION_MS);
-            setSnapshot(clean); setPhase('ready');
-          }).catch((error) => { if (life.mounted) setPhase(error.code || 'failed'); });
+            setSnapshot(clean); setFailure(null); setPhase('ready');
+          }).catch((error) => {
+            if (life.mounted) { const safe = presentationFrom(error); setFailure(safe); setPhase(safe.code); }
+          });
         }
         clearEntrySecrets(entry);
       } else if (!entry.error) {
         requestJson('health').then((value) => {
           if (!life.mounted) return;
-          if (value.version !== 'holdings-phone-v1') throw new FlowFailure('unavailable');
+          if (value.version !== 'holdings-phone-v1') throw new FlowFailure(localHoldingsError('shape'));
+          setFailure(value.configured === true ? null : localHoldingsError('configuration'));
           setPhase(value.configured === true ? 'initial' : 'not_configured');
-        }).catch((error) => { if (life.mounted) setPhase(error.code || 'failed'); });
+        }).catch((error) => {
+          if (life.mounted) { const safe = presentationFrom(error); setFailure(safe); setPhase(safe.code); }
+        });
       }
     }
     return () => { life.mounted = false; clearTimeout(life.timer); };
@@ -105,19 +110,21 @@ function PhonePage({ entry }) {
   const start = async (event) => {
     event.preventDefault(); if (phase !== 'initial') return;
     const expectedUserId = userId.trim(); if (!expectedUserId || expectedUserId.length > 80) return;
-    setPhase('starting'); setUserId('');
+    setPhase('starting'); setFailure(null); setUserId('');
     try {
-      if (!markHdfcFlowIntent('standalone')) throw new FlowFailure();
+      if (!markHdfcFlowIntent('standalone')) throw new FlowFailure(safeHoldingsError({ code: 'session_invalid', diagnostic: { stage: 'session', reason: 'session' } }));
       const result = await requestJson('start', { expected_user_id: expectedUserId });
       let loginUrl = result.login_url; result.login_url = null;
-      if (!validHdfcLoginUrl(loginUrl) || !Number.isFinite(Date.parse(result.expires_at)) || Date.parse(result.expires_at) <= Date.now()) throw new FlowFailure();
+      if (!validHdfcLoginUrl(loginUrl) || !Number.isFinite(Date.parse(result.expires_at)) || Date.parse(result.expires_at) <= Date.now()) throw new FlowFailure(localHoldingsError('shape'));
       window.location.assign(loginUrl); loginUrl = null;
-    } catch (error) { if (lifecycle.current.mounted) setPhase(error.code || 'failed'); }
+    } catch (error) {
+      if (lifecycle.current.mounted) { const safe = presentationFrom(error); setFailure(safe); setPhase(safe.code); }
+    }
   };
   const clear = () => {
     requestJson('clear').catch(() => {});
     lifecycle.current.deadline = 0; clearTimeout(lifecycle.current.timer);
-    clearEntrySecrets(entry); setSnapshot(null); setUserId(''); setPhase('initial');
+    clearEntrySecrets(entry); setSnapshot(null); setUserId(''); setFailure(null); setPhase('initial');
   };
 
   if (phase === 'ready' && snapshot && Date.now() < lifecycle.current.deadline) return <SnapshotView snapshot={snapshot} onClear={clear} />;
@@ -126,7 +133,10 @@ function PhonePage({ entry }) {
     <p>Sign in on this phone and view your holdings here. Sign in again to update the snapshot.</p>
     {['checking', 'processing', 'starting'].includes(phase) && <p role="status">{phase === 'checking' ? 'Checking availability…' : phase === 'starting' ? 'Opening official HDFC sign-in…' : 'Verifying your account and loading holdings…'}</p>}
     {phase === 'initial' && <form onSubmit={start}><label htmlFor="hc-user-id">Your HDFC client / user ID</label><input id="hc-user-id" value={userId} onChange={(event) => setUserId(event.target.value)} maxLength={80} required autoComplete="off" autoCapitalize="none" spellCheck={false} aria-describedby="hc-user-help" /><p id="hc-user-help" className="hc-small">Enter the account ID whose holdings you want to view. Your password, OTP, and consent belong only on HDFC’s official page.</p><button type="submit">Continue to HDFC</button></form>}
-    {!['checking', 'processing', 'starting', 'initial', 'cleared', 'expired'].includes(phase) && <p className="hc-notice hc-error" role="alert">{SAFE_ERRORS[phase] || SAFE_ERRORS.failed}</p>}
+    {!['checking', 'processing', 'starting', 'initial', 'cleared', 'expired'].includes(phase) && <div className="hc-notice hc-error" role="alert">
+      <p>{(failure || safeHoldingsError({ code: phase })).message}</p>
+      {failure?.reference && <p className="hc-small">Reference: {failure.reference}</p>}
+    </div>}
     {['expired', 'cleared'].includes(phase) && <p className="hc-notice" role="status">The snapshot has been cleared from this page.</p>}
     {!['checking', 'processing', 'starting', 'initial', 'not_configured'].includes(phase) && <a href="/holdings-connect">Start again</a>}
     <p className="hc-small">This page does not save credentials or holdings in browser storage. A downloaded snapshot stays in your files until you delete it.</p>

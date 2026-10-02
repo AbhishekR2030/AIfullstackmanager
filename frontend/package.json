@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "test:holdings-connect": "node --test src/services/holdingsConnectEntry.test.js",
+    "test:holdings-connect": "node --test src/services/holdingsConnectEntry.test.js src/services/holdingsPhoneErrors.test.js",
     "preview": "vite preview",
     "ios": "npx cap open ios",
     "ios:sim": "./scripts/run_ios_sim.sh"

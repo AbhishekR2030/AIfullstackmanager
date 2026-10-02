@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
-import { COOKIE_NAME, ENDPOINTS, MAX_INPUT_BYTES, MAX_RESPONSE_BYTES, ORIGIN, TTL_SECONDS, createHoldingsPhoneHandler, normalizeHoldings, openSession, sealSession } from './holdingsPhone.js';
+import { COOKIE_NAME, ENDPOINTS, FlowError, MAX_INPUT_BYTES, MAX_RESPONSE_BYTES, ORIGIN, TTL_SECONDS, createHoldingsPhoneHandler, normalizeHoldings, openSession, sealSession } from './holdingsPhone.js';
 
 const NOW = Date.parse('2026-10-02T12:00:00Z');
 const ENV = Object.freeze({ HDFC_API_KEY: 'synthetic-api-key', HDFC_API_SECRET: 'synthetic-api-secret', HDFC_ALLOWED_USER_ID: 'DEMOUSER' });
@@ -44,7 +44,7 @@ function fakeProvider({ user = 'DEMOUSER', holdings, responseOverrides = [] } = 
 
 test('health reports configured boolean and never exposes server values', async () => {
   const result = await invoke(create(), { method: 'GET' });
-  assert.deepEqual(result.body, { version: 'holdings-phone-v1', configured: true });
+  assert.deepEqual(result.body, { version: 'holdings-phone-v1', configured: true, diagnostics_version: 1 });
   assert.equal(result.headers['cache-control'], 'no-store, private');
   assert.equal(result.headers['referrer-policy'], 'no-referrer');
   for (const value of Object.values(ENV)) assert.ok(!result.raw.includes(value));
@@ -184,6 +184,7 @@ test('missing, duplicate and tampered cookie never contact broker', async () => 
     const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie: value } });
     assert.equal(result.status, 401);
     assert.equal(result.body.error.code, 'session_invalid');
+    assert.deepEqual(result.body.error.diagnostic, { stage: 'session', reason: 'session' });
     assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
   }
 });
@@ -194,6 +195,7 @@ test('expired and future-issued cookie fail closed without provider access', asy
   const expired = await invoke(create(noFetch, { now: () => NOW + (TTL_SECONDS + 1) * 1000 }), { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
   assert.equal(expired.status, 410);
   assert.equal(expired.body.error.code, 'session_expired');
+  assert.deepEqual(expired.body.error.diagnostic, { stage: 'session', reason: 'expired' });
   const future = COOKIE_NAME + '=' + sealSession(CONFIG, NOW + 1000).cookie;
   assert.equal((await invoke(create(), { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie: future } })).status, 401);
 });
@@ -213,6 +215,7 @@ test('provider errors are redacted and cookie is cleared', async () => {
   const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
   assert.equal(result.status, 502);
   assert.equal(result.body.error.code, 'provider_failed');
+  assert.deepEqual(result.body.error.diagnostic, { stage: 'token_exchange', reason: 'transport' });
   for (const value of ['synthetic-api-secret', 'synthetic-request-token', 'sensitive-provider-response']) assert.ok(!result.raw.includes(value));
   assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
 });
@@ -267,6 +270,7 @@ test('request timeout includes stalled response body and returns a redacted fail
   const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
   assert.equal(result.status, 502);
   assert.equal(result.body.error.code, 'provider_failed');
+  assert.deepEqual(result.body.error.diagnostic, { stage: 'token_exchange', reason: 'timeout' });
 });
 
 test('hung stream cancellation cannot extend the bounded error response', async () => {
@@ -299,4 +303,60 @@ test('snapshot bounds match the phone consumer before the login cookie is consum
   assert.throws(() => normalizeHoldings({ status: 'success', data: [{ isin: '  ', quantity: 1 }] }, NOW));
   assert.throws(() => normalizeHoldings({ status: 'success', data: [{ isin: 'DEMO00000001', quantity: 1, company_name: 'x'.repeat(241) }] }, NOW));
   assert.throws(() => normalizeHoldings({ status: 'success', data: Array.from({ length: 5001 }, () => ({ isin: 'DEMO00000001', quantity: 1 })) }, NOW));
+});
+
+const PRIVATE_SENTINELS = [ENV.HDFC_API_KEY, ENV.HDFC_API_SECRET, ENV.HDFC_ALLOWED_USER_ID, 'synthetic-request-token', 'synthetic-access-token', 'sensitive-provider-response', 'private_profile', 'raw_private_field'];
+const unsafeBody = JSON.stringify({ api_key: ENV.HDFC_API_KEY, apiSecret: ENV.HDFC_API_SECRET, user_id: ENV.HDFC_ALLOWED_USER_ID, accessToken: 'synthetic-access-token', request_token: 'synthetic-request-token', private_profile: 'sensitive-provider-response' });
+const diagnosticCases = [
+  { stage: 'token_exchange', reason: 'http_status', index: 0, response: () => new Response(unsafeBody, { status: 401 }), http_status: 401 },
+  { stage: 'token_exchange', reason: 'transport', index: 0, response: () => new Error(unsafeBody) },
+  { stage: 'token_exchange', reason: 'json', index: 0, response: () => new Response('sensitive-provider-response') },
+  { stage: 'token_exchange', reason: 'response_shape', index: 0, response: () => new Response(JSON.stringify({ status: 'error', accessToken: 'synthetic-access-token' })) },
+  { stage: 'token_exchange', reason: 'token_missing', index: 0, response: () => new Response(JSON.stringify({ status: 'success', data: { accessToken: 'synthetic-access-token' } })) },
+  { stage: 'profile', reason: 'http_status', index: 1, response: () => new Response(unsafeBody, { status: 405 }), http_status: 405 },
+  { stage: 'profile', reason: 'transport', index: 1, response: () => new Error(unsafeBody) },
+  { stage: 'profile', reason: 'json', index: 1, response: () => new Response('sensitive-provider-response') },
+  { stage: 'profile', reason: 'response_shape', index: 1, response: () => new Response(JSON.stringify({ status: 'success', data: { user_id: 'DEMOUSER' } })) },
+  { stage: 'profile', reason: 'identity_shape', index: 1, response: () => new Response(JSON.stringify({ status: 'success', data: [{ user_id: null, private_profile: unsafeBody }] })) },
+  { stage: 'holdings', reason: 'http_status', index: 2, response: () => new Response(unsafeBody, { status: 403 }), http_status: 403 },
+  { stage: 'holdings', reason: 'transport', index: 2, response: () => new Error(unsafeBody) },
+  { stage: 'holdings', reason: 'json', index: 2, response: () => new Response('sensitive-provider-response') },
+  { stage: 'holdings', reason: 'response_shape', index: 2, response: () => new Response(JSON.stringify({ status: 'success', data: null, private_profile: unsafeBody })) },
+  { stage: 'holdings', reason: 'snapshot_shape', index: 2, response: () => new Response(JSON.stringify({ status: 'success', data: [{ isin: 'DEMO00000001', quantity: null, raw_private_field: unsafeBody }] })) },
+  { stage: 'holdings', reason: 'response_size', index: 2, response: () => new Response('x'.repeat(MAX_RESPONSE_BYTES + 1)) },
+];
+
+for (const fixture of diagnosticCases) {
+  test(`sanitized ${fixture.stage}.${fixture.reason} identifies the failed stage and stops`, async () => {
+    const responses = [];
+    responses[fixture.index] = fixture.response();
+    const fake = fakeProvider({ responseOverrides: responses });
+    const handler = create(fake.fetchImpl);
+    const cookie = await started(handler);
+    const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
+    assert.equal(result.status, 502);
+    assert.equal(result.body.error.code, 'provider_failed');
+    const expected = { stage: fixture.stage, reason: fixture.reason };
+    if (fixture.http_status) expected.http_status = fixture.http_status;
+    assert.deepEqual(result.body.error.diagnostic, expected);
+    assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
+    assert.deepEqual(fake.calls.map(call => [call.options.method, new URL(call.url).origin + new URL(call.url).pathname]), [['POST', ENDPOINTS.auth], ['POST', ENDPOINTS.profile], ['GET', ENDPOINTS.holdings]].slice(0, fixture.index + 1));
+    for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
+  });
+}
+
+test('diagnostic serialization cannot forward extra data or invalid HTTP statuses', () => {
+  const diagnostic = { stage: 'profile', reason: 'http_status', http_status: 405, user_id: 'DEMOUSER', url: unsafeBody, headers: unsafeBody, body: unsafeBody };
+  assert.deepEqual(new FlowError('provider_failed', 502, diagnostic).diagnostic, { stage: 'profile', reason: 'http_status', http_status: 405 });
+  for (const http_status of [99, 600, '401', Infinity, NaN]) {
+    assert.deepEqual(new FlowError('provider_failed', 502, { stage: 'profile', reason: 'http_status', http_status }).diagnostic, { stage: 'profile', reason: 'http_status' });
+  }
+  assert.deepEqual(new FlowError('provider_failed', 502, { stage: unsafeBody, reason: unsafeBody }).diagnostic, { stage: 'request', reason: 'invalid' });
+});
+
+test('request and configured-owner denial diagnostics do not imply broker access', async () => {
+  const origin = await invoke(create(), { body: { action: 'clear' }, headers: { origin: 'https://evil.invalid' } });
+  assert.deepEqual(origin.body.error.diagnostic, { stage: 'request', reason: 'origin' });
+  const owner = await invoke(create(), { body: { action: 'start', expected_user_id: 'OTHERUSER' } });
+  assert.deepEqual(owner.body.error.diagnostic, { stage: 'request', reason: 'owner_mismatch' });
 });

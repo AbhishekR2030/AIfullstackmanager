@@ -26,12 +26,29 @@ const MESSAGES = Object.freeze({
   session_expired: 'The sign-in session expired. Start again.',
   provider_failed: 'HDFC could not complete a verified holdings snapshot. Start again later.',
 });
+const DIAGNOSTIC_STAGES = new Set(['request', 'session', 'token_exchange', 'profile', 'holdings']);
+const DIAGNOSTIC_REASONS = new Set(['invalid', 'origin', 'configuration', 'session', 'expired', 'owner_mismatch', 'http_status', 'transport', 'timeout', 'response_size', 'json', 'response_shape', 'token_missing', 'identity_shape', 'snapshot_shape']);
+const DEFAULT_DIAGNOSTICS = Object.freeze({
+  invalid_request: { stage: 'request', reason: 'invalid' },
+  method_not_allowed: { stage: 'request', reason: 'invalid' },
+  origin_not_allowed: { stage: 'request', reason: 'origin' },
+  not_configured: { stage: 'request', reason: 'configuration' },
+  account_mismatch: { stage: 'profile', reason: 'owner_mismatch' },
+  session_invalid: { stage: 'session', reason: 'session' },
+  session_expired: { stage: 'session', reason: 'expired' },
+});
 
 export class FlowError extends Error {
-  constructor(code, status = 400) {
+  constructor(code, status = 400, diagnostic = DEFAULT_DIAGNOSTICS[code]) {
     super(MESSAGES[code] || MESSAGES.provider_failed);
     this.code = code;
     this.status = status;
+    this.diagnostic = {
+      stage: DIAGNOSTIC_STAGES.has(diagnostic?.stage) ? diagnostic.stage : 'request',
+      reason: DIAGNOSTIC_REASONS.has(diagnostic?.reason) ? diagnostic.reason : 'invalid',
+    };
+    if (this.diagnostic.reason === 'http_status' && Number.isInteger(diagnostic?.http_status)
+      && diagnostic.http_status >= 100 && diagnostic.http_status <= 599) this.diagnostic.http_status = diagnostic.http_status;
   }
 }
 
@@ -116,41 +133,42 @@ function readCookie(header) {
 function numeric(value, required = false) {
   if (value == null || (typeof value === 'string' && !value.trim())) {
     if (!required) return null;
-    throw new FlowError('provider_failed', 502);
+    throw new FlowError('provider_failed', 502, { stage: 'holdings', reason: 'snapshot_shape' });
   }
   if (!['number', 'string'].includes(typeof value)
-    || (typeof value === 'string' && !/^[+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/iu.test(value.trim()))) throw new FlowError('provider_failed', 502);
+    || (typeof value === 'string' && !/^[+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/iu.test(value.trim()))) throw new FlowError('provider_failed', 502, { stage: 'holdings', reason: 'snapshot_shape' });
   const result = Number(value);
-  if (!Number.isFinite(result) || result < 0) throw new FlowError('provider_failed', 502);
+  if (!Number.isFinite(result) || result < 0) throw new FlowError('provider_failed', 502, { stage: 'holdings', reason: 'snapshot_shape' });
   return result;
 }
 
 export function normalizeHoldings(payload, nowMilliseconds) {
-  if (!payload || payload.status !== 'success' || !Array.isArray(payload.data) || payload.data.length > 5000) throw new FlowError('provider_failed', 502);
+  if (!payload || payload.status !== 'success' || !Array.isArray(payload.data)) throw new FlowError('provider_failed', 502, { stage: 'holdings', reason: 'response_shape' });
+  if (payload.data.length > 5000) throw new FlowError('provider_failed', 502, { stage: 'holdings', reason: 'response_size' });
   const holdings = payload.data.map(row => {
-    if (!row || typeof row !== 'object' || Array.isArray(row) || !validText(row.isin, 32) || !row.isin.trim()) throw new FlowError('provider_failed', 502);
+    if (!row || typeof row !== 'object' || Array.isArray(row) || !validText(row.isin, 32) || !row.isin.trim()) throw new FlowError('provider_failed', 502, { stage: 'holdings', reason: 'snapshot_shape' });
     const normalized = { isin: row.isin, quantity: numeric(row.quantity, true) };
     for (const field of ['company_name', 'security_id', 'exchange']) {
       const value = row[field];
-      if (value != null && typeof value !== 'string' && !(typeof value === 'number' && Number.isSafeInteger(value))) throw new FlowError('provider_failed', 502);
+      if (value != null && typeof value !== 'string' && !(typeof value === 'number' && Number.isSafeInteger(value))) throw new FlowError('provider_failed', 502, { stage: 'holdings', reason: 'snapshot_shape' });
       const text = value == null ? '' : String(value);
-      if (text !== '' && !validText(text, 240)) throw new FlowError('provider_failed', 502);
+      if (text !== '' && !validText(text, 240)) throw new FlowError('provider_failed', 502, { stage: 'holdings', reason: 'snapshot_shape' });
       normalized[field] = text;
     }
     for (const field of ['average_price', 'investment_value', 'close_price']) normalized[field] = numeric(row[field]);
     return normalized;
   });
   const snapshot = { snapshot_version: 1, source: 'HDFC InvestRight', as_of_utc: new Date(nowMilliseconds).toISOString(), account_verified: true, holdings_count: holdings.length, holdings };
-  if (Buffer.byteLength(JSON.stringify(snapshot), 'utf8') > MAX_RESPONSE_BYTES) throw new FlowError('provider_failed', 502);
+  if (Buffer.byteLength(JSON.stringify(snapshot), 'utf8') > MAX_RESPONSE_BYTES) throw new FlowError('provider_failed', 502, { stage: 'holdings', reason: 'response_size' });
   return snapshot;
 }
 
-async function withSignal(promise, signal) {
-  if (signal.aborted) throw new FlowError('provider_failed', 502);
+async function withSignal(promise, signal, stage) {
+  if (signal.aborted) throw new FlowError('provider_failed', 502, { stage, reason: 'timeout' });
   let abort;
   try {
     return await Promise.race([promise, new Promise((_, reject) => {
-      abort = () => reject(new FlowError('provider_failed', 502));
+      abort = () => reject(new FlowError('provider_failed', 502, { stage, reason: 'timeout' }));
       signal.addEventListener('abort', abort, { once: true });
     })]);
   } finally {
@@ -159,6 +177,7 @@ async function withSignal(promise, signal) {
 }
 
 async function providerJson(fetchImpl, method, endpoint, config, { accessToken, requestToken, overallSignal, requestTimeoutMs }) {
+  const stage = endpoint === ENDPOINTS.auth ? 'token_exchange' : endpoint === ENDPOINTS.profile ? 'profile' : 'holdings';
   const allowed = (method === 'POST' && [ENDPOINTS.auth, ENDPOINTS.profile].includes(endpoint)) || (method === 'GET' && endpoint === ENDPOINTS.holdings);
   if (!allowed) throw new FlowError('provider_failed', 502);
   const url = new URL(endpoint);
@@ -166,7 +185,7 @@ async function providerJson(fetchImpl, method, endpoint, config, { accessToken, 
   const headers = { Accept: 'application/json', 'User-Agent': USER_AGENT };
   const options = { method, headers, redirect: 'error', cache: 'no-store' };
   if (accessToken !== undefined) {
-    if (!validText(accessToken, 8192)) throw new FlowError('provider_failed', 502);
+    if (!validText(accessToken, 8192)) throw new FlowError('provider_failed', 502, { stage, reason: 'response_shape' });
     headers.Authorization = accessToken;
   }
   if (endpoint === ENDPOINTS.auth) {
@@ -177,23 +196,30 @@ async function providerJson(fetchImpl, method, endpoint, config, { accessToken, 
   options.signal = AbortSignal.any([overallSignal, AbortSignal.timeout(requestTimeoutMs)]);
   let reader;
   try {
-    const response = await withSignal(fetchImpl(url.toString(), options), options.signal);
-    if (response.status !== 200 || !response.body) throw new FlowError('provider_failed', 502);
+    const response = await withSignal(fetchImpl(url.toString(), options), options.signal, stage);
+    if (response.status !== 200) throw new FlowError('provider_failed', 502, { stage, reason: 'http_status', http_status: response.status });
+    if (!response.body) throw new FlowError('provider_failed', 502, { stage, reason: 'response_shape' });
     reader = response.body.getReader();
     const chunks = [];
     let total = 0;
     while (true) {
-      const chunk = await withSignal(reader.read(), options.signal);
+      const chunk = await withSignal(reader.read(), options.signal, stage);
       if (chunk.done) break;
       total += chunk.value.byteLength;
-      if (total > MAX_RESPONSE_BYTES) throw new FlowError('provider_failed', 502);
+      if (total > MAX_RESPONSE_BYTES) throw new FlowError('provider_failed', 502, { stage, reason: 'response_size' });
       chunks.push(Buffer.from(chunk.value));
     }
-    const payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total)));
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new FlowError('provider_failed', 502);
+    let payload;
+    try {
+      payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total)));
+    } catch {
+      throw new FlowError('provider_failed', 502, { stage, reason: 'json' });
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new FlowError('provider_failed', 502, { stage, reason: 'response_shape' });
     return payload;
-  } catch {
-    throw new FlowError('provider_failed', 502);
+  } catch (error) {
+    if (error instanceof FlowError) throw error;
+    throw new FlowError('provider_failed', 502, { stage, reason: options.signal.aborted ? 'timeout' : 'transport' });
   } finally {
     if (reader) {
       try { void reader.cancel().catch(() => {}); } catch { /* Cancellation cannot delay the bounded response. */ }
@@ -243,7 +269,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       const config = configFrom(env);
       if (req.method === 'GET') {
         if (query.length > 1 || (query.length === 1 && (query[0][0] !== 'action' || query[0][1] !== 'health'))) throw new FlowError('invalid_request');
-        send(res, 200, { version: VERSION, configured: config !== null });
+        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1 });
         return;
       }
       if (req.method !== 'POST') {
@@ -265,7 +291,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       if (body.action === 'callback') res.setHeader('Set-Cookie', cookieHeader('', 0));
       if (!config) throw new FlowError('not_configured', 503);
       if (body.action === 'start') {
-        if (!matchesOwner(body.expected_user_id, config)) throw new FlowError('account_mismatch', 403);
+        if (!matchesOwner(body.expected_user_id, config)) throw new FlowError('account_mismatch', 403, { stage: 'request', reason: 'owner_mismatch' });
         const session = sealSession(config, now());
         res.setHeader('Set-Cookie', cookieHeader(session.cookie, TTL_SECONDS));
         const login = new URL(ENDPOINTS.login);
@@ -281,12 +307,15 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       try {
         const auth = await providerJson(fetchImpl, 'POST', ENDPOINTS.auth, config, { requestToken: body.request_token, overallSignal, requestTimeoutMs });
         accessToken = auth.accessToken || auth.access_token;
-        if (![undefined, 'success'].includes(auth.status) || !validText(accessToken, 8192)) throw new FlowError('provider_failed', 502);
+        if (![undefined, 'success'].includes(auth.status)) throw new FlowError('provider_failed', 502, { stage: 'token_exchange', reason: 'response_shape' });
+        if (accessToken == null || accessToken === '') throw new FlowError('provider_failed', 502, { stage: 'token_exchange', reason: 'token_missing' });
+        if (!validText(accessToken, 8192)) throw new FlowError('provider_failed', 502, { stage: 'token_exchange', reason: 'response_shape' });
         if (session.exp <= Math.floor(now() / 1000)) throw new FlowError('session_expired', 410);
         const profile = await providerJson(fetchImpl, 'POST', ENDPOINTS.profile, config, { accessToken, overallSignal, requestTimeoutMs });
-        if (profile.status !== 'success' || !Array.isArray(profile.data) || profile.data.length !== 1 || !profile.data[0] || typeof profile.data[0] !== 'object') throw new FlowError('provider_failed', 502);
+        if (profile.status !== 'success' || !Array.isArray(profile.data) || profile.data.length !== 1 || !profile.data[0] || typeof profile.data[0] !== 'object') throw new FlowError('provider_failed', 502, { stage: 'profile', reason: 'response_shape' });
         const userId = profile.data[0].user_id;
-        if (!(typeof userId === 'string' || (typeof userId === 'number' && Number.isSafeInteger(userId)))) throw new FlowError('provider_failed', 502);
+        if (!(typeof userId === 'string' || (typeof userId === 'number' && Number.isSafeInteger(userId)))
+          || !validText(String(userId), 80) || !String(userId).trim()) throw new FlowError('provider_failed', 502, { stage: 'profile', reason: 'identity_shape' });
         if (!matchesOwner(String(userId), config)) throw new FlowError('account_mismatch', 403);
         if (session.exp <= Math.floor(now() / 1000)) throw new FlowError('session_expired', 410);
         const holdings = await providerJson(fetchImpl, 'GET', ENDPOINTS.holdings, config, { accessToken, overallSignal, requestTimeoutMs });
@@ -298,7 +327,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       }
     } catch (error) {
       const safe = error instanceof FlowError ? error : new FlowError('provider_failed', 502);
-      send(res, safe.status, { error: { code: safe.code, message: safe.message } });
+      send(res, safe.status, { error: { code: safe.code, message: safe.message, diagnostic: safe.diagnostic } });
     }
   };
 }
