@@ -8,6 +8,9 @@ export const VERSION = 'holdings-phone-v1';
 export const TTL_SECONDS = 600;
 export const MAX_INPUT_BYTES = 16 * 1024;
 export const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_VALIDATION_BYTES = 16 * 1024;
+const MAX_VALIDATION_ISSUES = 8;
+const VALIDATION_READ_TIMEOUT_MS = 2000;
 export const ENDPOINTS = Object.freeze({
   login: 'https://developer.hdfcsec.com/oapi/v1/login',
   auth: 'https://developer.hdfcsec.com/oapi/v1/access-token',
@@ -28,6 +31,12 @@ const MESSAGES = Object.freeze({
 });
 const DIAGNOSTIC_STAGES = new Set(['request', 'session', 'token_exchange', 'profile', 'holdings']);
 const DIAGNOSTIC_REASONS = new Set(['invalid', 'origin', 'configuration', 'session', 'expired', 'owner_mismatch', 'http_status', 'transport', 'timeout', 'response_size', 'json', 'response_shape', 'token_missing', 'identity_shape', 'snapshot_shape']);
+const VALIDATION_LOCATIONS = new Set(['header', 'query', 'body', 'path']);
+const VALIDATION_FIELDS = new Set(['api_key', 'authorization', 'user_agent', 'content_type', 'access_token', 'client_id', 'client_code', 'user_id', 'request_token', 'api_secret', 'token', 'other']);
+const VALIDATION_KINDS = new Set(['missing', 'invalid']);
+const MISSING_VALIDATION_TYPES = new Set(['missing', 'value_error.missing']);
+const INVALID_VALIDATION_TYPES = new Set(['string_type', 'string_unicode', 'string_too_short', 'string_too_long', 'string_pattern_mismatch', 'int_type', 'int_parsing', 'int_from_float', 'float_type', 'float_parsing', 'finite_number', 'bool_type', 'bool_parsing', 'list_type', 'dict_type', 'literal_error', 'enum', 'extra_forbidden', 'value_error', 'type_error.str', 'type_error.integer', 'type_error.float', 'type_error.bool', 'value_error.str.regex', 'value_error.any_str.min_length', 'value_error.any_str.max_length']);
+const HEADER_VALIDATION_FIELDS = new Map([['api_key', 'api_key'], ['authorization', 'authorization'], ['user-agent', 'user_agent'], ['user_agent', 'user_agent'], ['content-type', 'content_type'], ['content_type', 'content_type'], ['access_token', 'access_token'], ['client_id', 'client_id'], ['client_code', 'client_code'], ['user_id', 'user_id'], ['request_token', 'request_token'], ['api_secret', 'api_secret'], ['token', 'token']]);
 const DEFAULT_DIAGNOSTICS = Object.freeze({
   invalid_request: { stage: 'request', reason: 'invalid' },
   method_not_allowed: { stage: 'request', reason: 'invalid' },
@@ -37,6 +46,60 @@ const DEFAULT_DIAGNOSTICS = Object.freeze({
   session_invalid: { stage: 'session', reason: 'session' },
   session_expired: { stage: 'session', reason: 'expired' },
 });
+
+function ownValue(object, key) {
+  if (!object || typeof object !== 'object') return undefined;
+  return Object.getOwnPropertyDescriptor(object, key)?.value;
+}
+
+function sanitizedValidation(issues) {
+  if (!Array.isArray(issues)) return [];
+  const result = [];
+  const seen = new Set();
+  for (let index = 0; index < Math.min(issues.length, 32); index += 1) {
+    const issue = ownValue(issues, index);
+    if (!issue || typeof issue !== 'object' || Array.isArray(issue)) continue;
+    const location = ownValue(issue, 'location');
+    const field = ownValue(issue, 'field');
+    const kind = ownValue(issue, 'kind');
+    if (!VALIDATION_LOCATIONS.has(location) || !VALIDATION_FIELDS.has(field) || !VALIDATION_KINDS.has(kind)) continue;
+    const identity = `${location}:${field}:${kind}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    result.push({ location, field, kind });
+    if (result.length === MAX_VALIDATION_ISSUES) break;
+  }
+  return result;
+}
+
+function validationIssues(payload) {
+  const detail = ownValue(payload, 'detail');
+  if (!Array.isArray(detail)) return [];
+  const issues = [];
+  for (let index = 0; index < Math.min(detail.length, 32); index += 1) {
+    const item = ownValue(detail, index);
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const type = ownValue(item, 'type');
+    const kind = MISSING_VALIDATION_TYPES.has(type) ? 'missing' : INVALID_VALIDATION_TYPES.has(type) ? 'invalid' : undefined;
+    const loc = ownValue(item, 'loc');
+    if (!kind || !Array.isArray(loc) || loc.length < 1 || loc.length > 8) continue;
+    let flat = true;
+    for (let part = 0; part < loc.length; part += 1) {
+      const value = ownValue(loc, part);
+      if (typeof value !== 'string' && !(Number.isSafeInteger(value) && value >= 0)) flat = false;
+    }
+    if (!flat) continue;
+    const location = ownValue(loc, 0);
+    if (!VALIDATION_LOCATIONS.has(location)) continue;
+    const name = ownValue(loc, 1);
+    let field = 'other';
+    if (loc.length === 2 && typeof name === 'string') {
+      field = location === 'header' ? HEADER_VALIDATION_FIELDS.get(name.toLowerCase()) || 'other' : VALIDATION_FIELDS.has(name) ? name : 'other';
+    }
+    issues.push({ location, field, kind });
+  }
+  return sanitizedValidation(issues);
+}
 
 export class FlowError extends Error {
   constructor(code, status = 400, diagnostic = DEFAULT_DIAGNOSTICS[code]) {
@@ -49,6 +112,10 @@ export class FlowError extends Error {
     };
     if (this.diagnostic.reason === 'http_status' && Number.isInteger(diagnostic?.http_status)
       && diagnostic.http_status >= 100 && diagnostic.http_status <= 599) this.diagnostic.http_status = diagnostic.http_status;
+    if (this.diagnostic.stage === 'profile' && this.diagnostic.reason === 'http_status' && this.diagnostic.http_status === 422) {
+      const validation = sanitizedValidation(ownValue(diagnostic, 'validation'));
+      if (validation.length > 0) this.diagnostic.validation = validation;
+    }
   }
 }
 
@@ -176,6 +243,31 @@ async function withSignal(promise, signal, stage) {
   }
 }
 
+async function readProfileValidation(response, requestSignal) {
+  let reader;
+  try {
+    if (!response.body) return [];
+    const signal = AbortSignal.any([requestSignal, AbortSignal.timeout(VALIDATION_READ_TIMEOUT_MS)]);
+    reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    while (true) {
+      const chunk = await withSignal(reader.read(), signal, 'profile');
+      if (chunk.done) break;
+      total += chunk.value.byteLength;
+      if (total > MAX_VALIDATION_BYTES) return [];
+      chunks.push(Buffer.from(chunk.value));
+    }
+    return validationIssues(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total))));
+  } catch {
+    return [];
+  } finally {
+    if (reader) {
+      try { void reader.cancel().catch(() => {}); } catch { /* Optional diagnostics never delay the original error. */ }
+    }
+  }
+}
+
 async function providerJson(fetchImpl, method, endpoint, config, { accessToken, requestToken, overallSignal, requestTimeoutMs }) {
   const stage = endpoint === ENDPOINTS.auth ? 'token_exchange' : endpoint === ENDPOINTS.profile ? 'profile' : 'holdings';
   const allowed = (method === 'POST' && endpoint === ENDPOINTS.auth) || (method === 'GET' && [ENDPOINTS.profile, ENDPOINTS.holdings].includes(endpoint));
@@ -197,7 +289,11 @@ async function providerJson(fetchImpl, method, endpoint, config, { accessToken, 
   let reader;
   try {
     const response = await withSignal(fetchImpl(url.toString(), options), options.signal, stage);
-    if (response.status !== 200) throw new FlowError('provider_failed', 502, { stage, reason: 'http_status', http_status: response.status });
+    if (response.status !== 200) {
+      const diagnostic = { stage, reason: 'http_status', http_status: response.status };
+      if (endpoint === ENDPOINTS.profile && method === 'GET' && response.status === 422) diagnostic.validation = await readProfileValidation(response, options.signal);
+      throw new FlowError('provider_failed', 502, diagnostic);
+    }
     if (!response.body) throw new FlowError('provider_failed', 502, { stage, reason: 'response_shape' });
     reader = response.body.getReader();
     const chunks = [];
@@ -269,7 +365,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       const config = configFrom(env);
       if (req.method === 'GET') {
         if (query.length > 1 || (query.length === 1 && (query[0][0] !== 'action' || query[0][1] !== 'health'))) throw new FlowError('invalid_request');
-        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1, profile_method: 'GET' });
+        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1, profile_method: 'GET', validation_diagnostics_version: 1 });
         return;
       }
       if (req.method !== 'POST') {

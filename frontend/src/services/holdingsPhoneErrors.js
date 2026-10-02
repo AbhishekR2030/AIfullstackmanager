@@ -4,6 +4,12 @@ const REASONS = new Set([
   'http_status', 'transport', 'timeout', 'response_size', 'json', 'response_shape',
   'identity_shape', 'snapshot_shape', 'token_missing',
 ]);
+const VALIDATION_LOCATIONS = new Set(['header', 'query', 'body', 'path']);
+const VALIDATION_FIELDS = new Set([
+  'api_key', 'authorization', 'user_agent', 'content_type', 'access_token',
+  'client_id', 'client_code', 'user_id', 'request_token', 'api_secret', 'token', 'other',
+]);
+const VALIDATION_KINDS = new Set(['missing', 'invalid']);
 const MESSAGES = Object.freeze({
   not_configured: 'This holdings page needs owner setup before it can be used.',
   invalid_request: 'This sign-in response could not be verified. Start a new sign-in.',
@@ -25,6 +31,38 @@ function dataValue(record, key) {
   return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
 }
 
+// Optional validation metadata must not invalidate the fixed diagnostic when
+// a malformed array/item is rejected. Inspect only the first eight positions.
+function validationReference(diagnostic) {
+  try {
+    const issues = dataValue(diagnostic, 'validation');
+    if (!Array.isArray(issues)) return '';
+    const prototype = Object.getPrototypeOf(issues);
+    if (prototype !== Array.prototype && prototype !== null) return '';
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(issues, 'length');
+    const length = lengthDescriptor && Object.hasOwn(lengthDescriptor, 'value') ? lengthDescriptor.value : null;
+    if (!Number.isSafeInteger(length) || length < 0) return '';
+    const accepted = new Set();
+    for (let index = 0; index < Math.min(length, 8); index += 1) {
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(issues, `${index}`);
+        if (!descriptor || !Object.hasOwn(descriptor, 'value')) continue;
+        const issue = descriptor.value;
+        const location = dataValue(issue, 'location');
+        const field = dataValue(issue, 'field');
+        const kind = dataValue(issue, 'kind');
+        if (typeof location !== 'string' || location.length > 6 || !VALIDATION_LOCATIONS.has(location)
+            || typeof field !== 'string' || field.length > 13 || !VALIDATION_FIELDS.has(field)
+            || typeof kind !== 'string' || kind.length > 7 || !VALIDATION_KINDS.has(kind)) continue;
+        accepted.add(`.V.${location}.${field}.${kind}`);
+      } catch { /* Reject this optional item without losing the fixed reference. */ }
+    }
+    return [...accepted].join('');
+  } catch {
+    return '';
+  }
+}
+
 /** Convert backend errors to fixed UI copy and enum-only diagnostic references. */
 export function safeHoldingsError(value) {
   try {
@@ -43,6 +81,9 @@ export function safeHoldingsError(value) {
       const status = dataValue(diagnostic, 'http_status');
       if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) {
         reference += `.HTTP${status}`;
+      }
+      if (stage === 'profile' && reason === 'http_status' && status === 422) {
+        reference += validationReference(diagnostic);
       }
       if (code === 'provider_failed') {
         if (stage === 'token_exchange') message = 'HDFC sign-in could not be completed. Share the reference below for help.';

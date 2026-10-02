@@ -44,7 +44,7 @@ function fakeProvider({ user = 'DEMOUSER', holdings, responseOverrides = [] } = 
 
 test('health reports configured boolean and never exposes server values', async () => {
   const result = await invoke(create(), { method: 'GET' });
-  assert.deepEqual(result.body, { version: 'holdings-phone-v1', configured: true, diagnostics_version: 1, profile_method: 'GET' });
+  assert.deepEqual(result.body, { version: 'holdings-phone-v1', configured: true, diagnostics_version: 1, profile_method: 'GET', validation_diagnostics_version: 1 });
   assert.equal(result.headers['cache-control'], 'no-store, private');
   assert.equal(result.headers['referrer-policy'], 'no-referrer');
   for (const value of Object.values(ENV)) assert.ok(!result.raw.includes(value));
@@ -390,4 +390,193 @@ test('request and configured-owner denial diagnostics do not imply broker access
   assert.deepEqual(origin.body.error.diagnostic, { stage: 'request', reason: 'origin' });
   const owner = await invoke(create(), { body: { action: 'start', expected_user_id: 'OTHERUSER' } });
   assert.deepEqual(owner.body.error.diagnostic, { stage: 'request', reason: 'owner_mismatch' });
+});
+
+const PROFILE_422 = { stage: 'profile', reason: 'http_status', http_status: 422 };
+
+async function profileValidation(response, options = {}) {
+  const fake = fakeProvider({ responseOverrides: [undefined, response] });
+  const handler = create(fake.fetchImpl, options);
+  const cookie = await started(handler);
+  const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
+  assert.equal(result.status, 502);
+  assert.equal(result.body.error.code, 'provider_failed');
+  assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
+  assert.deepEqual(fake.calls.map(call => [call.options.method, new URL(call.url).origin + new URL(call.url).pathname]), [['POST', ENDPOINTS.auth], ['GET', ENDPOINTS.profile]]);
+  for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
+  return { result, calls: fake.calls };
+}
+
+function validationResponse(detail) {
+  return new Response(JSON.stringify({ detail }), { status: 422 });
+}
+
+test('profile422 exposes only enum validation metadata and keeps the documented request intact', async () => {
+  const { result, calls } = await profileValidation(validationResponse([{ loc: ['header', 'Authorization'], type: 'missing', msg: unsafeBody, input: unsafeBody, ctx: { private_profile: unsafeBody }, api_key: ENV.HDFC_API_KEY }]));
+  assert.deepEqual(result.body.error.diagnostic, { ...PROFILE_422, validation: [{ location: 'header', field: 'authorization', kind: 'missing' }] });
+  const profile = calls[1];
+  assert.deepEqual([...new URL(profile.url).searchParams], [['api_key', ENV.HDFC_API_KEY]]);
+  assert.equal(profile.options.headers.Authorization, 'synthetic-access-token');
+  assert.equal(profile.options.headers['User-Agent'], 'AlphaSeeker-Holdings-Phone/1.0');
+  assert.equal(profile.options.headers.Accept, 'application/json');
+  assert.equal(profile.options.headers['Content-Type'], undefined);
+  assert.equal(profile.options.body, undefined);
+});
+
+test('validation aliases are exact and nested or unknown fields become other', async () => {
+  const { result } = await profileValidation(validationResponse([
+    { loc: ['header', 'USER-AGENT'], type: 'value_error.missing' },
+    { loc: ['header', 'Content-Type'], type: 'string_type' },
+    { loc: ['query', 'api_key'], type: 'missing' },
+    { loc: ['query', 'apiKey'], type: 'missing' },
+    { loc: ['body'], type: 'missing' },
+    { loc: ['body', 'user_id', 0], type: 'value_error' },
+    { loc: ['path', 'client_id'], type: 'string_pattern_mismatch' },
+    { loc: ['header', '__proto__'], type: 'missing' },
+  ]));
+  assert.deepEqual(result.body.error.diagnostic.validation, [
+    { location: 'header', field: 'user_agent', kind: 'missing' },
+    { location: 'header', field: 'content_type', kind: 'invalid' },
+    { location: 'query', field: 'api_key', kind: 'missing' },
+    { location: 'query', field: 'other', kind: 'missing' },
+    { location: 'body', field: 'other', kind: 'missing' },
+    { location: 'body', field: 'other', kind: 'invalid' },
+    { location: 'path', field: 'client_id', kind: 'invalid' },
+    { location: 'header', field: 'other', kind: 'missing' },
+  ]);
+});
+
+test('unknown validation locations, model types and malformed loc arrays are omitted', async () => {
+  const { result } = await profileValidation(validationResponse([
+    { loc: ['query', 'api_key'], type: unsafeBody },
+    { loc: ['query', 'api_key'], type: 'missing.secret-model' },
+    { loc: [unsafeBody, 'api_key'], type: 'missing' },
+    { loc: ['header', { private_profile: unsafeBody }], type: 'missing' },
+    { loc: ['body', null], type: 'missing' },
+    { loc: ['body', -1], type: 'missing' },
+    { loc: Array(9).fill('body'), type: 'missing' },
+    { loc: [], type: 'missing' },
+    { loc: 'header.Authorization', type: 'missing' },
+    null,
+    { loc: ['query', 'API_KEY'], type: 'type_error.str', msg: unsafeBody },
+    { loc: ['header', 'constructor'], type: 'missing' },
+  ]));
+  assert.deepEqual(result.body.error.diagnostic.validation, [
+    { location: 'query', field: 'other', kind: 'invalid' },
+    { location: 'header', field: 'other', kind: 'missing' },
+  ]);
+});
+
+test('validation scans first32 only and caps eight unique fixed triples', async () => {
+  const detail = Array.from({ length: 32 }, () => ({ loc: ['query', 'api_key'], type: 'missing' }));
+  detail.push({ loc: ['header', 'Authorization'], type: 'missing' });
+  const limited = await profileValidation(validationResponse(detail));
+  assert.deepEqual(limited.result.body.error.diagnostic.validation, [{ location: 'query', field: 'api_key', kind: 'missing' }]);
+  const fields = ['api_key', 'authorization', 'user_agent', 'content_type', 'access_token', 'client_id', 'client_code', 'user_id', 'request_token', 'api_secret', 'token', 'other'];
+  const capped = await profileValidation(validationResponse(fields.flatMap(field => Array(2).fill({ loc: ['query', field], type: 'missing' }))));
+  assert.deepEqual(capped.result.body.error.diagnostic.validation, fields.slice(0, 8).map(field => ({ location: 'query', field, kind: 'missing' })));
+  for (const field of fields.slice(8)) {
+    const diagnostic = new FlowError('provider_failed', 502, { ...PROFILE_422, validation: [{ location: 'query', field, kind: 'invalid' }] }).diagnostic;
+    assert.deepEqual(diagnostic.validation, [{ location: 'query', field, kind: 'invalid' }]);
+  }
+});
+
+test('malformed or absent profile422 bodies retain the original HTTP reference', async () => {
+  for (const response of [
+    new Response('not-json ' + unsafeBody, { status: 422 }),
+    new Response(new Uint8Array([0xff]), { status: 422 }),
+    new Response(null, { status: 422 }),
+    validationResponse(null),
+    new Response(JSON.stringify({ detail: { loc: ['body'], type: 'missing', input: unsafeBody } }), { status: 422 }),
+  ]) {
+    const { result } = await profileValidation(response);
+    assert.deepEqual(result.body.error.diagnostic, PROFILE_422);
+  }
+});
+
+test('optional profile422 body enforces16KiB before decoding and cancels excess data', async () => {
+  const json = JSON.stringify({ detail: [{ loc: ['header', 'Authorization'], type: 'missing' }] });
+  const exact = await profileValidation(new Response(json.padEnd(16 * 1024, ' '), { status: 422 }));
+  assert.equal(exact.result.body.error.diagnostic.validation[0].field, 'authorization');
+  let cancelCalls = 0;
+  let readCalls = 0;
+  const response = { status: 422, body: { getReader() { return {
+    async read() { readCalls += 1; return { done: false, value: new Uint8Array(readCalls === 1 ? 16 * 1024 : 1) }; },
+    async cancel() { cancelCalls += 1; },
+  }; } } };
+  const { result } = await profileValidation(response);
+  assert.deepEqual(result.body.error.diagnostic, PROFILE_422);
+  assert.equal(readCalls, 2);
+  assert.equal(cancelCalls, 1);
+});
+
+test('optional422 parsing obeys remaining request and callback deadlines without replacing HTTP422', async () => {
+  for (const options of [{ requestTimeoutMs: 10 }, { callbackTimeoutMs: 10 }]) {
+    let timer;
+    const response = new Response(new ReadableStream({
+      start(controller) { timer = setTimeout(() => { controller.close(); }, 100); },
+      cancel() { clearTimeout(timer); },
+    }), { status: 422 });
+    const { result } = await profileValidation(response, options);
+    assert.deepEqual(result.body.error.diagnostic, PROFILE_422);
+  }
+});
+
+test('optional422 own two-second deadline bounds a reader that ignores abort and cancellation', async () => {
+  let cancelCalls = 0;
+  const response = { status: 422, body: { getReader() { return {
+    read() { return new Promise(() => {}); },
+    cancel() { cancelCalls += 1; return new Promise(() => {}); },
+  }; } } };
+  const keepAlive = setTimeout(() => {}, 3000);
+  const began = performance.now();
+  try {
+    const { result } = await profileValidation(response);
+    assert.deepEqual(result.body.error.diagnostic, PROFILE_422);
+    assert.equal(cancelCalls, 1);
+    assert.ok(performance.now() - began < 2800);
+  } finally {
+    clearTimeout(keepAlive);
+  }
+});
+
+test('optional422 stream failures and synchronous cancellation failures preserve HTTP422', async () => {
+  const response = { status: 422, body: { getReader() { return {
+    async read() { throw new Error(unsafeBody); },
+    cancel() { throw new Error(unsafeBody); },
+  }; } } };
+  const { result } = await profileValidation(response);
+  assert.deepEqual(result.body.error.diagnostic, PROFILE_422);
+});
+
+test('other provider endpoints and profile statuses never read validation error bodies', async () => {
+  for (const [index, stage, status] of [[0, 'token_exchange', 422], [2, 'holdings', 422], [1, 'profile', 401], [1, 'profile', 404], [1, 'profile', 500]]) {
+    let reads = 0;
+    const overrides = [];
+    overrides[index] = { status, body: { getReader() { reads += 1; throw new Error(unsafeBody); } } };
+    const fake = fakeProvider({ responseOverrides: overrides });
+    const handler = create(fake.fetchImpl);
+    const cookie = await started(handler);
+    const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
+    assert.deepEqual(result.body.error.diagnostic, { stage, reason: 'http_status', http_status: status });
+    assert.equal(reads, 0);
+    assert.equal(fake.calls.length, index + 1);
+  }
+});
+
+test('FlowError revalidates diagnostic triples, strips extras, and refuses getter or prototype values', () => {
+  let getterCalls = 0;
+  const getter = { field: 'authorization', kind: 'missing', get location() { getterCalls += 1; return 'header'; } };
+  const inherited = Object.create({ location: 'header', field: 'authorization', kind: 'missing' });
+  const validation = [getter, inherited, { location: unsafeBody, field: 'authorization', kind: 'missing' }, { location: 'header', field: unsafeBody, kind: 'missing' }, { location: 'header', field: 'authorization', kind: unsafeBody }, { location: 'header', field: 'authorization', kind: 'missing', msg: unsafeBody, input: unsafeBody }, { location: 'header', field: 'authorization', kind: 'missing' }];
+  Object.defineProperty(validation, 0, { get() { getterCalls += 1; return getter; } });
+  const diagnostic = new FlowError('provider_failed', 502, { ...PROFILE_422, validation }).diagnostic;
+  assert.deepEqual(diagnostic, { ...PROFILE_422, validation: [{ location: 'header', field: 'authorization', kind: 'missing' }] });
+  assert.equal(getterCalls, 0);
+  for (const changed of [{ stage: 'holdings' }, { reason: 'response_shape' }, { http_status: 400 }]) {
+    assert.equal(new FlowError('provider_failed', 502, { ...PROFILE_422, ...changed, validation }).diagnostic.validation, undefined);
+  }
+  const secretGetter = { ...PROFILE_422, get validation() { getterCalls += 1; return validation; } };
+  assert.deepEqual(new FlowError('provider_failed', 502, secretGetter).diagnostic, PROFILE_422);
+  assert.equal(getterCalls, 0);
 });

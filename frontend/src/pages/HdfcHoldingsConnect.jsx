@@ -135,7 +135,7 @@ function PhonePage({ entry }) {
     {phase === 'initial' && <form onSubmit={start}><label htmlFor="hc-user-id">Your HDFC client / user ID</label><input id="hc-user-id" value={userId} onChange={(event) => setUserId(event.target.value)} maxLength={80} required autoComplete="off" autoCapitalize="none" spellCheck={false} aria-describedby="hc-user-help" /><p id="hc-user-help" className="hc-small">Enter the account ID whose holdings you want to view. Your password, OTP, and consent belong only on HDFC’s official page.</p><button type="submit">Continue to HDFC</button></form>}
     {!['checking', 'processing', 'starting', 'initial', 'cleared', 'expired'].includes(phase) && <div className="hc-notice hc-error" role="alert">
       <p>{(failure || safeHoldingsError({ code: phase })).message}</p>
-      {failure?.reference && <p className="hc-small">Reference: {failure.reference}</p>}
+      {failure?.reference && <p className="hc-small hc-reference">Reference: {failure.reference}</p>}
     </div>}
     {['expired', 'cleared'].includes(phase) && <p className="hc-notice" role="status">The snapshot has been cleared from this page.</p>}
     {!['checking', 'processing', 'starting', 'initial', 'not_configured'].includes(phase) && <a href="/holdings-connect">Start again</a>}
@@ -148,6 +148,7 @@ const STYLES = `
 .hc-card{max-width:960px;margin:0 auto;background:#fff;border:1px solid #dce2eb;border-radius:22px;padding:clamp(22px,4vw,44px);box-shadow:0 12px 40px #1525410a}
 .hc-brand{font-weight:750;letter-spacing:-.02em;color:#244be1;margin-bottom:28px}.hc-eyebrow{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:#58708c;font-weight:650;margin:0 0 8px}
 .hc-card h1{font-size:clamp(27px,4vw,38px);line-height:1.2;margin:0 0 18px;letter-spacing:-.03em}.hc-card h2{font-size:22px;margin:0 0 16px}.hc-card p{max-width:680px}.hc-small{font-size:14px;color:#59687c}
+.hc-reference{overflow-wrap:anywhere}
 .hc-card form{max-width:560px;margin:26px 0}.hc-card label{display:block;font-weight:650;margin-bottom:8px}.hc-card input{box-sizing:border-box;width:100%;font:inherit;color:inherit;background:#fff;border:1px solid #a8b6c9;border-radius:10px;padding:13px 14px;min-height:48px}
 .hc-card input:focus,.hc-card button:focus-visible,.hc-table-wrap:focus{outline:3px solid #93b6ff;outline-offset:3px}.hc-code-input{font-family:ui-monospace,monospace!important;font-size:14px!important}
 .hc-card button{font:inherit;font-weight:650;color:#fff;background:#244be1;border:1px solid transparent;border-radius:10px;padding:13px 18px;min-height:48px;cursor:pointer}.hc-card button:disabled{opacity:.6;cursor:wait}.hc-card .hc-secondary{color:#244be1;background:#fff;border-color:#b3c1df}
