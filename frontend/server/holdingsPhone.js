@@ -47,8 +47,14 @@ const ERROR_MESSAGES = Object.freeze({
   unprocessable_request: ['Unprocessable entity', 'Unprocessable request'],
 });
 const MESSAGE_CATEGORIES = new Map(Object.entries(ERROR_MESSAGES).flatMap(([category, messages]) => messages.map(message => [message.toLowerCase(), category])));
-const ERROR_MESSAGE_FIELDS = ['message', 'Message', 'MESSAGE', 'msg', 'Msg', 'MSG', 'errorMessage', 'ErrorMessage', 'error_message', 'ERROR_MESSAGE', 'errorMsg', 'error_msg', 'displayMessage', 'DisplayMessage', 'display_message', 'displaymessage', 'status_error', 'description', 'detail', 'error', 'Error', 'ERROR'];
-const ERROR_CODE_FIELDS = ['code', 'Code', 'CODE', 'errorCode', 'ErrorCode', 'error_code', 'ERROR_CODE', 'errorcode'];
+const ERROR_MESSAGE_FIELDS = ['message', 'Message', 'MESSAGE', 'msg', 'Msg', 'MSG', 'errorMessage', 'ErrorMessage', 'error_message', 'ERROR_MESSAGE', 'errorMsg', 'error_msg', 'displayMessage', 'DisplayMessage', 'display_message', 'displaymessage', 'status_error', 'statusMsg', 'statusMessage', 'description', 'detail', 'error', 'Error', 'ERROR'];
+const ERROR_CODE_FIELDS = ['code', 'Code', 'CODE', 'errorCode', 'ErrorCode', 'error_code', 'ERROR_CODE', 'errorcode', 'statusCode'];
+export const PROVIDER_ERROR_PATH_SEGMENTS = Object.freeze(['root', 'meta', 'error', 'errors', 'error_response', 'data', 'detail', 'response', 'message', 'code', 'status', 'other', 'items']);
+export const PROVIDER_ERROR_TYPES = Object.freeze(['null', 'string', 'number', 'boolean', 'object', 'array']);
+export const PROVIDER_ERROR_TERMS = Object.freeze(['api_key', 'api_secret', 'access_token', 'request_token', 'authorization', 'user', 'client', 'account', 'application', 'ip', 'static_ip', 'redirect', 'holdings', 'portfolio', 'subscription', 'plan', 'permission', 'scope', 'signature', 'checksum', 'timestamp', 'version', 'parameter', 'missing', 'required', 'invalid', 'expired', 'rejected', 'denied', 'not', 'allowed', 'whitelisted', 'registered', 'activated', 'mapped', 'matched', 'found', 'disabled', 'enabled', 'entitled', 'configured', 'empty', 'null', 'success', 'failure']);
+const REPORT_CONTAINERS = new Set(['meta', 'error', 'errors', 'error_response', 'data', 'detail', 'response']);
+const IDENTIFIER_KEYS = new Set(['isin', 'symbol', 'securityid', 'accountid', 'accountnumber', 'accountno', 'customerid', 'clientid', 'clientcode', 'clientnumber', 'userid', 'client', 'user', 'account', 'pan', 'phone', 'mobile', 'email']);
+const GENERIC_CODE_FIELDS = new Set(['code', 'Code', 'CODE']);
 const MAX_ERROR_BYTES = 16 * 1024;
 const MAX_ERROR_MS = 2000;
 const DEFAULT_DIAGNOSTICS = Object.freeze({
@@ -131,6 +137,8 @@ function copyErrorDiagnostic(target, source) {
   if (dataValue(source, 'provider_code') === '60014') target.provider_code = '60014';
   const validation = canonicalValidation(dataValue(source, 'validation'));
   if (validation.length) target.validation = validation;
+  const report = canonicalProviderReport(dataValue(source, 'provider_report'));
+  if (report) target.provider_report = report;
   if (category === 'unknown' && !target.provider_code && !validation.length
     && ERROR_OUTCOMES.has(outcome) && outcome !== 'classified') {
     const suppliedFlags = dataValue(source, 'format_flags');
@@ -141,6 +149,154 @@ function copyErrorDiagnostic(target, source) {
     }
     if (Object.keys(flags).length) target.format_flags = flags;
   }
+}
+
+function canonicalProviderReport(value) {
+  if (dataValue(value, 'version') !== 1) return null;
+  const codes = arrayValues(dataValue(value, 'provider_codes'), 4);
+  const schema = arrayValues(dataValue(value, 'error_schema'), 16);
+  const terms = arrayValues(dataValue(value, 'message_terms'), 24);
+  if (!codes || codes.length > 4 || !schema || schema.length > 16 || !terms || terms.length > 24) return null;
+  if (codes.values.some(code => typeof code !== 'string' || !/^[0-9]{1,6}$/u.test(code)) || new Set(codes.values).size !== codes.length) return null;
+  const cleanSchema = [];
+  const seen = new Set();
+  for (const item of schema.values) {
+    const path = dataValue(item, 'path');
+    const type = dataValue(item, 'type');
+    if (typeof path !== 'string' || path.length > 95 || !PROVIDER_ERROR_TYPES.includes(type)) return null;
+    const segments = path.split('.');
+    if (segments.length > 6 || segments[0] !== 'root' || segments.slice(1).includes('root') || segments.some(segment => !PROVIDER_ERROR_PATH_SEGMENTS.includes(segment))) return null;
+    const key = `${path}:${type}`;
+    if (seen.has(key)) return null;
+    seen.add(key);
+    cleanSchema.push({ path, type });
+  }
+  let previous = -1;
+  for (const term of terms.values) {
+    const index = PROVIDER_ERROR_TERMS.indexOf(term);
+    if (index <= previous) return null;
+    previous = index;
+  }
+  return { version: 1, provider_codes: [...codes.values], error_schema: cleanSchema, message_terms: [...terms.values] };
+}
+
+function identifierKey(key) { return IDENTIFIER_KEYS.has(key.toLowerCase().replace(/[_-]/gu, '')); }
+
+// The bounded body is parsed privately, then every scalar/key is sanitized before
+// classification. This also handles JSON Unicode escapes without corrupting JSON.
+function sanitizeProviderPayload(payload, runtimeSecrets) {
+  const identifiers = [];
+  const pending = [payload];
+  while (pending.length) {
+    const value = pending.pop();
+    if (!value || typeof value !== 'object') continue;
+    for (const key of Object.keys(value)) {
+      const child = value[key];
+      if (identifierKey(key) && (typeof child === 'string' || typeof child === 'number')) identifiers.push(String(child));
+      if (child && typeof child === 'object') pending.push(child);
+    }
+  }
+  const privateValues = [...new Set([...runtimeSecrets, ...identifiers].filter(value => typeof value === 'string' && value.length > 0))];
+  const forbiddenCodes = new Set(privateValues);
+  for (const value of privateValues) if (/^[0-9]+$/u.test(value)) forbiddenCodes.add(String(Number(value)));
+  const variants = [...new Set(privateValues.flatMap(value => {
+    const form = new URLSearchParams({ value }).toString().slice(6);
+    return [value, encodeURIComponent(value), encodeURI(value), form, JSON.stringify(value).slice(1, -1)];
+  }))].sort((left, right) => right.length - left.length);
+  const scrub = supplied => {
+    let text = supplied;
+    for (let pass = 0; pass < 3; pass += 1) {
+      for (const variant of variants) text = text.replaceAll(variant, '[redacted]');
+      text = text.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]\b/giu, '[redacted]')
+        .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu, '[redacted]')
+        .replace(/\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/gu, '[redacted]')
+        .replace(/\b[A-Z]{2}[A-Z0-9]{9}[0-9]\b/giu, '[redacted]')
+        .replace(/(?:\+?91[\s-]?)?\b[6-9][0-9]{9}\b/gu, '[redacted]')
+        .replace(/\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/gu, '[redacted]');
+      if (pass < 2 && /%[0-9a-f]{2}/iu.test(text)) {
+        try { text = decodeURIComponent(text.replaceAll('+', ' ')); } catch { /* Keep already sanitized text. */ }
+      }
+    }
+    return text;
+  };
+  const scalar = value => typeof value === 'string' ? scrub(value)
+    : typeof value === 'number' && forbiddenCodes.has(String(value)) ? null : value;
+  if (!payload || typeof payload !== 'object') return { payload: scalar(payload), forbiddenCodes };
+  const sanitized = Array.isArray(payload) ? [] : Object.create(null);
+  const work = [[payload, sanitized]];
+  while (work.length) {
+    const [original, target] = work.pop();
+    for (const key of Object.keys(original)) {
+      const safeKey = Array.isArray(original) ? key : scrub(key);
+      const child = original[key];
+      if (child && typeof child === 'object') {
+        const copy = Array.isArray(child) ? [] : Object.create(null);
+        target[safeKey] = copy;
+        work.push([child, copy]);
+      } else target[safeKey] = scalar(child);
+    }
+  }
+  return { payload: sanitized, forbiddenCodes };
+}
+
+function providerReport(payload, forbiddenCodes) {
+  const codes = new Set();
+  const schema = [];
+  const schemaKeys = new Set();
+  const foundTerms = new Set();
+  const queue = [{ value: payload, path: ['root'], depth: 0 }];
+  let nodes = 0;
+  const typeOf = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  const addSchema = (path, value) => {
+    const type = typeOf(value);
+    const name = path.join('.');
+    const key = `${name}:${type}`;
+    if (schema.length < 16 && path.length <= 6 && PROVIDER_ERROR_TYPES.includes(type) && !schemaKeys.has(key)) {
+      schemaKeys.add(key); schema.push({ path: name, type });
+    }
+  };
+  const addTerms = value => {
+    if (typeof value !== 'string') return;
+    const text = value.toLowerCase().replace(/[_-]/gu, ' ');
+    for (const term of PROVIDER_ERROR_TERMS) {
+      const phrase = term === 'holdings' ? 'holdings?' : term.replaceAll('_', '[\\s_-]+');
+      if (new RegExp(`(?:^|[^a-z0-9])${phrase}(?:$|[^a-z0-9])`, 'u').test(text)) foundTerms.add(term);
+    }
+  };
+  while (queue.length && nodes < 64) {
+    const { value, path, depth } = queue.shift();
+    nodes += 1;
+    addSchema(path, value);
+    if (typeof value === 'string') { if (path.length === 1) addTerms(value); continue; }
+    if (!value || typeof value !== 'object' || depth >= 4) continue;
+    if (Array.isArray(value)) {
+      for (const child of value.slice(0, 4)) queue.push({ value: child, path: [...path, 'items'], depth: depth + 1 });
+      continue;
+    }
+    const keys = Object.keys(value);
+    const identifying = keys.some(identifierKey);
+    const status = dataValue(value, 'status');
+    const errorContext = path.some(segment => ['error', 'errors', 'error_response'].includes(segment))
+      || (path.length === 1 && typeof status === 'string' && ['error', 'failure'].includes(status.toLowerCase()))
+      || ERROR_MESSAGE_FIELDS.some(key => typeof dataValue(value, key) === 'string');
+    for (const key of keys) {
+      if (nodes >= 64) break;
+      nodes += 1;
+      const child = dataValue(value, key);
+      const segment = REPORT_CONTAINERS.has(key) ? key : ERROR_MESSAGE_FIELDS.includes(key) ? 'message'
+        : ERROR_CODE_FIELDS.includes(key) ? 'code' : key === 'status' ? 'status' : 'other';
+      const childPath = [...path, segment];
+      addSchema(childPath, child);
+      if (ERROR_MESSAGE_FIELDS.includes(key)) addTerms(child);
+      if (!identifying && ERROR_CODE_FIELDS.includes(key) && (!GENERIC_CODE_FIELDS.has(key) || (errorContext && (child === '60014' || child === 60014)))
+        && (typeof child === 'string' || (typeof child === 'number' && Number.isSafeInteger(child)))) {
+        const code = String(child);
+        if (/^[0-9]{1,6}$/u.test(code) && !forbiddenCodes.has(code) && codes.size < 4) codes.add(code);
+      }
+      if (REPORT_CONTAINERS.has(key) && child && typeof child === 'object') queue.push({ value: child, path: childPath, depth: depth + 1 });
+    }
+  }
+  return { version: 1, provider_codes: [...codes], error_schema: schema, message_terms: PROVIDER_ERROR_TERMS.filter(term => foundTerms.has(term)).slice(0, 24) };
 }
 
 function validationDetails(records) {
@@ -228,8 +384,8 @@ function responseFormat(response) {
   } catch { return 'absent'; }
 }
 
-async function readHoldingsError(response, existingSignal) {
-  const diagnostic = { response_format: responseFormat(response), error_outcome: 'read_error', error_category: 'unknown' };
+async function readHoldingsError(response, existingSignal, redactionSecrets) {
+  const diagnostic = { response_format: responseFormat(response), error_outcome: 'read_error', error_category: 'unknown', provider_report: { version: 1, provider_codes: [], error_schema: [], message_terms: [] } };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MAX_ERROR_MS);
   const signal = AbortSignal.any([existingSignal, controller.signal]);
@@ -261,10 +417,12 @@ async function readHoldingsError(response, existingSignal) {
     let payload;
     try { payload = JSON.parse(text); }
     catch {
-      const category = messageCategory(text);
-      return { ...diagnostic, error_outcome: category ? 'classified' : diagnostic.response_format === 'json' ? 'invalid_json' : 'non_json', error_category: category || 'unknown' };
+      const sanitized = sanitizeProviderPayload(text, redactionSecrets);
+      const category = messageCategory(sanitized.payload);
+      return { ...diagnostic, error_outcome: category ? 'classified' : diagnostic.response_format === 'json' ? 'invalid_json' : 'non_json', error_category: category || 'unknown', provider_report: providerReport(sanitized.payload, sanitized.forbiddenCodes) };
     }
-    return { response_format: diagnostic.response_format, ...classifyErrorPayload(payload) };
+    const sanitized = sanitizeProviderPayload(payload, redactionSecrets);
+    return { response_format: diagnostic.response_format, ...classifyErrorPayload(sanitized.payload), provider_report: providerReport(sanitized.payload, sanitized.forbiddenCodes) };
   } catch {
     return { ...diagnostic, error_outcome: signal.aborted ? 'timeout' : 'read_error' };
   } finally {
@@ -389,7 +547,7 @@ async function withSignal(promise, signal, stage) {
   }
 }
 
-async function providerJson(fetchImpl, method, endpoint, config, { accessToken, requestToken, overallSignal, requestTimeoutMs, formatFlags }) {
+async function providerJson(fetchImpl, method, endpoint, config, { accessToken, requestToken, overallSignal, requestTimeoutMs, formatFlags, redactionSecrets }) {
   const stage = endpoint === ENDPOINTS.auth ? 'token_exchange' : 'holdings';
   const allowed = (method === 'POST' && endpoint === ENDPOINTS.auth) || (method === 'GET' && endpoint === ENDPOINTS.holdings);
   if (!allowed) throw new FlowError('provider_failed', 502);
@@ -413,7 +571,7 @@ async function providerJson(fetchImpl, method, endpoint, config, { accessToken, 
     if (response.status !== 200 && !(endpoint === ENDPOINTS.holdings && response.status === 201)) {
       const diagnostic = { stage, reason: 'http_status', http_status: response.status };
       if (endpoint === ENDPOINTS.holdings && method === 'GET' && response.status === 422) {
-        const details = await readHoldingsError(response, options.signal);
+        const details = await readHoldingsError(response, options.signal, redactionSecrets);
         copyErrorDiagnostic(diagnostic, details);
         if (diagnostic.error_category === 'unknown' && !diagnostic.provider_code && !diagnostic.validation
           && diagnostic.error_outcome !== 'classified') diagnostic.format_flags = formatFlags;
@@ -491,7 +649,7 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
       const config = configFrom(env);
       if (req.method === 'GET') {
         if (query.length > 1 || (query.length === 1 && (query[0][0] !== 'action' || query[0][1] !== 'health'))) throw new FlowError('invalid_request');
-        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1, holdings_diagnostics_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', holdings_auth_mode: 'raw_token', profile_verification: false });
+        send(res, 200, { version: VERSION, configured: config !== null, diagnostics_version: 1, holdings_diagnostics_version: 1, provider_error_report_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', holdings_auth_mode: 'raw_token', profile_verification: false });
         return;
       }
       if (req.method !== 'POST') {
@@ -541,7 +699,8 @@ export function createHoldingsPhoneHandler({ env = process.env, fetchImpl = glob
           top_level_token_fields_conflict: validText(camelToken, 8192) && !!camelToken.trim()
             && validText(snakeToken, 8192) && !!snakeToken.trim() && camelToken !== snakeToken,
         };
-        const holdings = await providerJson(fetchImpl, 'GET', ENDPOINTS.holdings, config, { accessToken, overallSignal, requestTimeoutMs, formatFlags });
+        const redactionSecrets = [config.key, config.secret, body.request_token, camelToken, snakeToken];
+        const holdings = await providerJson(fetchImpl, 'GET', ENDPOINTS.holdings, config, { accessToken, overallSignal, requestTimeoutMs, formatFlags, redactionSecrets });
         if (session.exp <= Math.floor(now() / 1000)) throw new FlowError('session_expired', 410);
         send(res, 200, normalizeHoldings(holdings, now()));
       } finally {

@@ -202,7 +202,7 @@ async function verify422(flow, suffix, { token = TOKEN, flags = false } = {}) {
   const diagnostic = failure.body.error.diagnostic;
   const permittedFields = new Set([
     'stage', 'reason', 'http_status', 'error_outcome', 'response_format',
-    'error_category', 'provider_code', 'validation', 'format_flags',
+    'error_category', 'provider_code', 'validation', 'format_flags', 'provider_report',
   ]);
   assert.ok(Object.keys(diagnostic).every(field => permittedFields.has(field)));
   assert.equal(diagnostic.stage, 'holdings');
@@ -292,7 +292,87 @@ test('unknown messages in the added static aliases are never echoed or guessed',
     msg: unknown, MSG: unknown, status_error: unknown, DisplayMessage: unknown,
     ErrorMessage: unknown, ErrorCode: '60015', user_id: PRIVATE_MARKER,
   } }), `.R.unknown.M.json.E.unknown${FALSE_FLAGS}`, { flags: true });
-  assert.equal(JSON.stringify(failure.body).includes('60015'), false);
+  assert.deepEqual(failure.body.error.diagnostic.provider_report.provider_codes, [],
+    'a code next to an account identifier is withheld');
+  assert.equal(safeHoldingsError(failure.body.error).reference.includes('60015'), false);
+});
+
+test('meta status aliases produce a useful safe report through the actual frontend formatter', async () => {
+  const providerMessage = 'Application is not mapped to API key; subscription permission required';
+  const { failure, safe } = await verify422(fixture({ holdingsStatus: 422, holdings: {
+    status: 'error',
+    meta: { statusCode: 60015, statusMsg: providerMessage, callback: PRIVATE_MARKER },
+    arbitrary_private_field: PRIVATE_MARKER,
+  } }), `.R.unknown.M.json.E.unknown${FALSE_FLAGS}`, { flags: true });
+  const report = failure.body.error.diagnostic.provider_report;
+  assert.deepEqual(report, {
+    version: 1, provider_codes: ['60015'],
+    error_schema: [
+      { path: 'root', type: 'object' },
+      { path: 'root.status', type: 'string' },
+      { path: 'root.meta', type: 'object' },
+      { path: 'root.other', type: 'string' },
+      { path: 'root.meta.code', type: 'number' },
+      { path: 'root.meta.message', type: 'string' },
+      { path: 'root.meta.other', type: 'string' },
+    ],
+    message_terms: ['api_key', 'application', 'subscription', 'permission', 'required', 'not', 'mapped'],
+  });
+  assert.deepEqual(safe.providerReport, report);
+  assert.notEqual(safe.providerReport, report, 'formatter returns its own validated copy');
+  assert.match(safe.providerReportText, /^Safe provider error report v1\nReference: holdings\.http_status\.HTTP422\./);
+  assert.ok(safe.providerReportText.includes('Provider codes: 60015'));
+  assert.ok(safe.providerReportText.includes('root.meta.message: string'));
+  for (const value of [providerMessage, 'arbitrary_private_field', 'callback']) {
+    assert.equal(JSON.stringify(failure.body).includes(value), false);
+    assert.equal(JSON.stringify(safe).includes(value), false);
+  }
+});
+
+test('runtime tokens and encoded aliases are removed before deriving report concepts or numeric codes', async () => {
+  const selected = `${TOKEN}/access+permission`;
+  const alternate = `${TOKEN}-alternate/subscription+required`;
+  const variants = [KEY, SECRET, REQUEST_TOKEN, selected, alternate].flatMap(value => [
+    value, encodeURIComponent(value), encodeURIComponent(encodeURIComponent(value)),
+    new URLSearchParams({ value }).toString().slice(6),
+  ]);
+  const { failure, safe } = await verify422(fixture({
+    auth: { accessToken: selected, access_token: alternate }, holdingsStatus: 422,
+    holdings: {
+      meta: { statusCode: 12345, statusMsg: variants.join(' | ') },
+      user_id: '12345', error: { errorCode: '54321', message: PRIVATE_MARKER },
+      arbitrary_private_field: PRIVATE_MARKER,
+    },
+  }), '.R.unknown.M.json.E.unknown.F.key_space.false.F.token_space.false.F.bearer_prefix.false.F.token_conflict.true',
+  { token: selected, flags: true });
+  assert.deepEqual(safe.providerReport.provider_codes, ['54321']);
+  assert.deepEqual(safe.providerReport.message_terms, []);
+  assert.deepEqual(safe.providerReport, failure.body.error.diagnostic.provider_report);
+  for (const value of [...variants, '12345', 'arbitrary_private_field']) {
+    assert.equal(JSON.stringify(failure.body).includes(value), false);
+    assert.equal(JSON.stringify(safe).includes(value), false);
+  }
+});
+
+test('frontend discards a malformed optional report while retaining the handler error reference', async () => {
+  const { failure, safe } = await verify422(fixture({ holdingsStatus: 422, holdings: {
+    meta: { errorCode: '60015', statusMsg: 'Application not mapped' },
+  } }), `.R.unknown.M.json.E.unknown${FALSE_FLAGS}`, { flags: true });
+  assert.ok(safe.providerReport);
+  for (const corrupt of [
+    report => { report.raw_message = PRIVATE_MARKER; },
+    report => { report.error_schema[0].path = `root.${PRIVATE_MARKER}`; },
+    report => { report.provider_codes = [PRIVATE_MARKER]; },
+    report => { report.message_terms = ['mapped', 'application']; },
+  ]) {
+    const supplied = structuredClone(failure.body.error);
+    corrupt(supplied.diagnostic.provider_report);
+    const rejected = safeHoldingsError(supplied);
+    assert.equal(rejected.reference, safe.reference);
+    assert.equal(Object.hasOwn(rejected, 'providerReport'), false);
+    assert.equal(Object.hasOwn(rejected, 'providerReportText'), false);
+    assertNoPrivateValues(rejected);
+  }
 });
 
 test('non422 holdings failures make a single raw-token GET with no auth retry or header fallback', async () => {

@@ -23,6 +23,20 @@ const FORMAT_FLAGS = Object.freeze([
   ['token_has_bearer_prefix', 'bearer_prefix'],
   ['top_level_token_fields_conflict', 'token_conflict'],
 ]);
+// Independent browser allowlists: a provider report is never trusted merely
+// because it came from this app's API. No arbitrary provider text is accepted.
+const REPORT_PATH_SEGMENTS = new Set(['root', 'meta', 'error', 'errors', 'error_response', 'data', 'detail', 'response', 'message', 'code', 'status', 'other', 'items']);
+const REPORT_TYPES = new Set(['null', 'string', 'number', 'boolean', 'object', 'array']);
+const REPORT_TERMS = Object.freeze([
+  'api_key', 'api_secret', 'access_token', 'request_token', 'authorization',
+  'user', 'client', 'account', 'application', 'ip', 'static_ip', 'redirect',
+  'holdings', 'portfolio', 'subscription', 'plan', 'permission', 'scope',
+  'signature', 'checksum', 'timestamp', 'version', 'parameter', 'missing',
+  'required', 'invalid', 'expired', 'rejected', 'denied', 'not', 'allowed',
+  'whitelisted', 'registered', 'activated', 'mapped', 'matched', 'found',
+  'disabled', 'enabled', 'entitled', 'configured', 'empty', 'null', 'success', 'failure',
+]);
+const REPORT_TERM_ORDER = new Map(REPORT_TERMS.map((term, index) => [term, index]));
 const MESSAGES = Object.freeze({
   not_configured: 'This holdings page needs setup before it can be used.',
   invalid_request: 'This sign-in response could not be verified. Start a new sign-in.',
@@ -79,6 +93,83 @@ function validationReference(diagnostic, maximumExamined = 8, allowXApiKey = fal
 
 function optionalDataValue(record, key) {
   try { return dataValue(record, key); } catch { return undefined; }
+}
+
+function exactDataRecord(value, names) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== names.length || keys.some((key) => typeof key !== 'string' || !names.includes(key))) return null;
+  const record = {};
+  for (const name of names) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, name);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) return null;
+    record[name] = descriptor.value;
+  }
+  return record;
+}
+
+function boundedDataArray(value, maximum) {
+  if (!Array.isArray(value)) return null;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Array.prototype && prototype !== null) return null;
+  const length = Object.getOwnPropertyDescriptor(value, 'length')?.value;
+  if (!Number.isSafeInteger(length) || length < 0 || length > maximum) return null;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== length + 1 || keys.some((key) => typeof key !== 'string'
+    || (key !== 'length' && !/^(?:0|[1-9][0-9]*)$/u.test(key)))) return null;
+  const accepted = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, `${index}`);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) return null;
+    accepted.push(descriptor.value);
+  }
+  return accepted;
+}
+
+function safeProviderReport(value) {
+  try {
+    const supplied = exactDataRecord(value, ['version', 'provider_codes', 'error_schema', 'message_terms']);
+    if (!supplied || supplied.version !== 1) return null;
+    const codes = boundedDataArray(supplied.provider_codes, 4);
+    const schema = boundedDataArray(supplied.error_schema, 16);
+    const terms = boundedDataArray(supplied.message_terms, 24);
+    if (!codes || !schema || !terms || codes.some((code) => typeof code !== 'string' || !/^[0-9]{1,6}$/u.test(code))
+      || new Set(codes).size !== codes.length) return null;
+    const acceptedSchema = [];
+    const seenSchema = new Set();
+    for (const item of schema) {
+      const entry = exactDataRecord(item, ['path', 'type']);
+      if (!entry || typeof entry.path !== 'string' || entry.path.length > 95
+        || typeof entry.type !== 'string' || !REPORT_TYPES.has(entry.type)) return null;
+      const segments = entry.path.split('.');
+      if (segments.length > 6 || segments[0] !== 'root' || segments.slice(1).includes('root')
+        || segments.some((segment) => !REPORT_PATH_SEGMENTS.has(segment))) return null;
+      const key = `${entry.path}:${entry.type}`;
+      if (seenSchema.has(key)) return null;
+      seenSchema.add(key);
+      acceptedSchema.push({ path: segments.join('.'), type: entry.type });
+    }
+    let previousOrder = -1;
+    for (const term of terms) {
+      const order = typeof term === 'string' ? REPORT_TERM_ORDER.get(term) : undefined;
+      if (order === undefined || order <= previousOrder) return null;
+      previousOrder = order;
+    }
+    return { version: 1, provider_codes: [...codes], error_schema: acceptedSchema, message_terms: [...terms] };
+  } catch { return null; }
+}
+
+function providerReportText(report, reference) {
+  return [
+    'Safe provider error report v1',
+    `Reference: ${reference}`,
+    `Provider codes: ${report.provider_codes.length ? report.provider_codes.join(', ') : 'none reported'}`,
+    `Provider message mentions: ${report.message_terms.length ? report.message_terms.map((term) => term.replaceAll('_', ' ')).join(', ') : 'no recognized terms'}`,
+    'Error field types:',
+    ...report.error_schema.map(({ path, type }) => `${path}: ${type}`),
+  ].join('\n');
 }
 
 // Optional holdings observations never replace the original HTTP422 reference.
@@ -141,7 +232,16 @@ export function safeHoldingsError(value) {
         message = 'The holdings service could not be reached. Check your connection and try again.';
       }
     }
-    return { code, message, reference };
+    const presentation = { code, message, reference };
+    if (validDiagnostic && stage === 'holdings' && reason === 'http_status'
+      && dataValue(diagnostic, 'http_status') === 422) {
+      const report = safeProviderReport(optionalDataValue(diagnostic, 'provider_report'));
+      if (report) {
+        presentation.providerReport = report;
+        presentation.providerReportText = providerReportText(report, reference);
+      }
+    }
+    return presentation;
   } catch {
     return { code: 'failed', message: MESSAGES.failed, reference: null };
   }

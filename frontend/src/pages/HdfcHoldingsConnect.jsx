@@ -51,6 +51,26 @@ function SnapshotView({ snapshot, onClear }) {
   </>;
 }
 
+function ProviderReportView({ text }) {
+  const [copyStatus, setCopyStatus] = useState('');
+  const copy = async () => {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        setCopyStatus('Select the report text to copy it.');
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      setCopyStatus('Safe report copied.');
+    } catch { setCopyStatus('Select the report text to copy it.'); }
+  };
+  return <details className="hc-provider-report">
+    <summary>Safe provider error report</summary>
+    <pre className="hc-small">{text}</pre>
+    <button type="button" className="hc-secondary" onClick={copy}>Copy safe report</button>
+    {copyStatus && <p className="hc-small" role="status">{copyStatus}</p>}
+  </details>;
+}
+
 function PhonePage({ entry }) {
   const [phase, setPhase] = useState(entry.error || (entry.kind === 'callback' && !entry.requestToken) ? 'invalid_request' : entry.kind === 'callback' ? 'processing' : 'checking');
   const [failure, setFailure] = useState(entry.error || (entry.kind === 'callback' && !entry.requestToken) ? localHoldingsError('callback') : null);
@@ -136,6 +156,7 @@ function PhonePage({ entry }) {
     {!['checking', 'processing', 'starting', 'initial', 'cleared', 'expired'].includes(phase) && <div className="hc-notice hc-error" role="alert">
       <p>{(failure || safeHoldingsError({ code: phase })).message}</p>
       {failure?.reference && <p className="hc-small hc-reference">Reference: {failure.reference}</p>}
+      {failure?.providerReportText && <ProviderReportView text={failure.providerReportText} />}
     </div>}
     {['expired', 'cleared'].includes(phase) && <p className="hc-notice" role="status">The snapshot has been cleared from this page.</p>}
     {!['checking', 'processing', 'starting', 'initial', 'not_configured'].includes(phase) && <a href="/holdings-connect">Start again</a>}
@@ -149,6 +170,7 @@ const STYLES = `
 .hc-brand{font-weight:750;letter-spacing:-.02em;color:#244be1;margin-bottom:28px}.hc-eyebrow{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:#58708c;font-weight:650;margin:0 0 8px}
 .hc-card h1{font-size:clamp(27px,4vw,38px);line-height:1.2;margin:0 0 18px;letter-spacing:-.03em}.hc-card h2{font-size:22px;margin:0 0 16px}.hc-card p{max-width:680px}.hc-small{font-size:14px;color:#59687c}
 .hc-reference{overflow-wrap:anywhere}
+.hc-provider-report{margin-top:18px}.hc-provider-report summary{cursor:pointer;font-weight:650}.hc-provider-report pre{white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;margin:14px 0}.hc-provider-report button{max-width:100%}
 .hc-card form{max-width:560px;margin:26px 0}.hc-card label{display:block;font-weight:650;margin-bottom:8px}.hc-card input{box-sizing:border-box;width:100%;font:inherit;color:inherit;background:#fff;border:1px solid #a8b6c9;border-radius:10px;padding:13px 14px;min-height:48px}
 .hc-card input:focus,.hc-card button:focus-visible,.hc-table-wrap:focus{outline:3px solid #93b6ff;outline-offset:3px}.hc-code-input{font-family:ui-monospace,monospace!important;font-size:14px!important}
 .hc-card button{font:inherit;font-weight:650;color:#fff;background:#244be1;border:1px solid transparent;border-radius:10px;padding:13px 18px;min-height:48px;cursor:pointer}.hc-card button:disabled{opacity:.6;cursor:wait}.hc-card .hc-secondary{color:#244be1;background:#fff;border-color:#b3c1df}

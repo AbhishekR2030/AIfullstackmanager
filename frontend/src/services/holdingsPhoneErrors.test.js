@@ -2,6 +2,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { localHoldingsError, safeHoldingsError } from './holdingsPhoneErrors.js';
 
+const REPORT_TERMS = [
+  'api_key', 'api_secret', 'access_token', 'request_token', 'authorization', 'user',
+  'client', 'account', 'application', 'ip', 'static_ip', 'redirect', 'holdings',
+  'portfolio', 'subscription', 'plan', 'permission', 'scope', 'signature',
+  'checksum', 'timestamp', 'version', 'parameter', 'missing', 'required',
+  'invalid', 'expired', 'rejected', 'denied', 'not', 'allowed', 'whitelisted',
+  'registered', 'activated', 'mapped', 'matched', 'found', 'disabled', 'enabled',
+  'entitled', 'configured', 'empty', 'null', 'success', 'failure',
+];
+
 const CODES = [
   'not_configured', 'invalid_request', 'origin_not_allowed', 'session_invalid',
   'session_expired', 'account_mismatch', 'provider_failed', 'unavailable', 'failed',
@@ -13,6 +23,135 @@ const REASONS = [
   'identity_shape', 'snapshot_shape',
 ];
 const RAW = 'OFFLINE_SECRET_SENTINEL';
+
+function reportFixture(overrides = {}) {
+  return {
+    version: 1,
+    provider_codes: ['60042'],
+    error_schema: [{ path: 'root', type: 'object' }, { path: 'root.meta.message', type: 'string' }],
+    message_terms: ['api_key', 'client', 'not', 'registered'],
+    ...overrides,
+  };
+}
+
+function reportError(provider_report, overrides = {}) {
+  return safeHoldingsError({ code: 'provider_failed', diagnostic: {
+    stage: 'holdings', reason: 'http_status', http_status: 422, provider_report, ...overrides,
+  } });
+}
+
+test('safe provider report retains numeric metadata, canonical types and message concepts', () => {
+  const supplied = reportFixture();
+  const result = reportError(supplied);
+  assert.equal(result.reference, 'holdings.http_status.HTTP422');
+  assert.deepEqual(result.providerReport, supplied);
+  assert.match(result.providerReportText, /Provider codes: 60042/u);
+  assert.match(result.providerReportText, /Provider message mentions: api key, client, not, registered/u);
+  assert.match(result.providerReportText, /root\.meta\.message: string/u);
+  assert.doesNotMatch(result.providerReportText, /caused|cause is|credentials are invalid/iu);
+  supplied.provider_codes[0] = RAW;
+  supplied.message_terms[0] = RAW;
+  supplied.error_schema[0].path = RAW;
+  assert.equal(JSON.stringify(result).includes(RAW), false);
+});
+
+test('provider report accepts all fixed terms and types in bounded canonical groups', () => {
+  for (let index = 0; index < REPORT_TERMS.length; index += 24) {
+    const terms = REPORT_TERMS.slice(index, index + 24);
+    assert.deepEqual(reportError(reportFixture({ message_terms: terms })).providerReport.message_terms, terms);
+  }
+  const types = ['null', 'string', 'number', 'boolean', 'object', 'array'];
+  const schema = types.map((type) => ({ path: 'root.data.items.other', type }));
+  assert.deepEqual(reportError(reportFixture({ error_schema: schema })).providerReport.error_schema, schema);
+  const codes = ['0', '001', '60014', '999999'];
+  assert.deepEqual(reportError(reportFixture({ provider_codes: codes })).providerReport.provider_codes, codes);
+  assert.deepEqual(reportError(reportFixture({ provider_codes: [], error_schema: [], message_terms: [] })).providerReport,
+    { version: 1, provider_codes: [], error_schema: [], message_terms: [] });
+});
+
+test('any arbitrary secret, private identifier or field invalidates the optional report', () => {
+  const privateValues = [RAW, 'ABCDE1234F', '9876543210', 'DEMO-CLIENT-42', '192.0.2.9',
+    'owner@example.invalid', 'INE000DEMO00', '<script>offline</script>', 'ordinary-private-name'];
+  const baseline = reportError(undefined);
+  for (const value of privateValues) {
+    for (const report of [
+      reportFixture({ provider_codes: [value] }),
+      reportFixture({ message_terms: ['api_key', value] }),
+      reportFixture({ error_schema: [{ path: `root.${value}`, type: 'string' }] }),
+      reportFixture({ error_schema: [{ path: 'root.message', type: value }] }),
+      reportFixture({ error_schema: [{ path: 'root.message', type: 'string', message: value }] }),
+      reportFixture({ message: value }),
+      reportFixture({ [value]: 'string' }),
+    ]) {
+      const result = reportError(report);
+      assert.deepEqual(result, baseline);
+      assert.equal(JSON.stringify(result).includes(value), false);
+    }
+  }
+});
+
+test('malformed report fields, bounds and canonical ordering fail closed', () => {
+  const baseline = reportError(undefined);
+  const invalid = [
+    undefined, null, false, RAW, [], new Date(), Object.create(reportFixture()),
+    reportFixture({ version: '1' }), reportFixture({ version: 2 }),
+    reportFixture({ provider_codes: ['1234567'] }), reportFixture({ provider_codes: [60042] }),
+    reportFixture({ provider_codes: ['1', '1'] }), reportFixture({ provider_codes: ['1', '2', '3', '4', '5'] }),
+    reportFixture({ provider_codes: [' 60042'] }), reportFixture({ provider_codes: ['60042\n'] }),
+    reportFixture({ provider_codes: [Object('60042')] }), reportFixture({ message_terms: ['not', 'api_key'] }),
+    reportFixture({ message_terms: ['api_key', 'api_key'] }), reportFixture({ message_terms: REPORT_TERMS.slice(0, 25) }),
+    reportFixture({ message_terms: ['API_KEY'] }), reportFixture({ message_terms: [Object('api_key')] }),
+    reportFixture({ error_schema: [{ path: 'meta.message', type: 'string' }] }),
+    reportFixture({ error_schema: [{ path: 'root..message', type: 'string' }] }),
+    reportFixture({ error_schema: [{ path: 'root.meta.root', type: 'string' }] }),
+    reportFixture({ error_schema: [{ path: 'root.error.error.error.error.error.message', type: 'string' }] }),
+    reportFixture({ error_schema: [{ path: 'root.message', type: 'STRING' }] }),
+    reportFixture({ error_schema: [{ path: 'root', type: 'object' }, { path: 'root', type: 'object' }] }),
+    reportFixture({ error_schema: Array.from({ length: 17 }, () => ({ path: 'root', type: 'object' })) }),
+    reportFixture({ error_schema: [{ path: 'root.message', type: 'string', extra: RAW }] }),
+  ];
+  for (const report of invalid) assert.deepEqual(reportError(report), baseline);
+});
+
+test('safe report requires dense own-data arrays and never invokes getters or coercion', () => {
+  let reads = 0;
+  const getter = { enumerable: true, get() { reads += 1; throw new Error(RAW); } };
+  const codeGetter = ['60042']; Object.defineProperty(codeGetter, '0', getter);
+  const termGetter = ['api_key']; Object.defineProperty(termGetter, '0', getter);
+  const fieldGetter = { path: 'root.message', type: 'string' }; Object.defineProperty(fieldGetter, 'type', getter);
+  const reportGetter = reportFixture(); Object.defineProperty(reportGetter, 'message_terms', getter);
+  const inherited = ['60042']; Object.setPrototypeOf(inherited, Object.create(Array.prototype));
+  const extraArrayField = ['60042']; extraArrayField.private = RAW;
+  const symbolArrayField = ['60042']; symbolArrayField[Symbol(RAW)] = RAW;
+  const sparse = new Array(1);
+  const poison = { [Symbol.toPrimitive]() { reads += 1; throw new Error(RAW); } };
+  const proxy = new Proxy(reportFixture(), { ownKeys() { throw new Error(RAW); } });
+  const baseline = reportError(undefined);
+  for (const report of [reportGetter, proxy,
+    reportFixture({ provider_codes: codeGetter }), reportFixture({ message_terms: termGetter }),
+    reportFixture({ error_schema: [fieldGetter] }), reportFixture({ provider_codes: inherited }),
+    reportFixture({ provider_codes: extraArrayField }), reportFixture({ provider_codes: symbolArrayField }),
+    reportFixture({ provider_codes: sparse }), reportFixture({ provider_codes: [poison] }),
+  ]) assert.deepEqual(reportError(report), baseline);
+  assert.equal(reads, 0);
+});
+
+test('null-prototype reports remain canonical and reports cannot escape holdings422 gating', () => {
+  const source = reportFixture();
+  const report = Object.assign(Object.create(null), source);
+  Object.setPrototypeOf(report.provider_codes, null);
+  Object.setPrototypeOf(report.message_terms, null);
+  Object.setPrototypeOf(report.error_schema, null);
+  assert.equal(reportError(report).providerReport.version, 1);
+  for (const overrides of [
+    { stage: 'token_exchange' }, { stage: 'profile' }, { stage: 'request' },
+    { reason: 'transport' }, { http_status: 401 }, { http_status: 201 }, { http_status: '422' },
+  ]) {
+    const result = reportError(report, overrides);
+    assert.equal(result.providerReport, undefined);
+    assert.equal(result.providerReportText, undefined);
+  }
+});
 
 function assertSafeShape(value) {
   assert.deepEqual(Object.keys(value).sort(), ['code', 'message', 'reference']);

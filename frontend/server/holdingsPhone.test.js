@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
-import { COOKIE_NAME, ENDPOINTS, FlowError, MAX_INPUT_BYTES, MAX_RESPONSE_BYTES, ORIGIN, TTL_SECONDS, createHoldingsPhoneHandler, normalizeHoldings, openSession, sealSession } from './holdingsPhone.js';
+import { COOKIE_NAME, ENDPOINTS, FlowError, MAX_INPUT_BYTES, MAX_RESPONSE_BYTES, ORIGIN, PROVIDER_ERROR_PATH_SEGMENTS, PROVIDER_ERROR_TERMS, PROVIDER_ERROR_TYPES, TTL_SECONDS, createHoldingsPhoneHandler, normalizeHoldings, openSession, sealSession } from './holdingsPhone.js';
 
 const NOW = Date.parse('2026-10-02T12:00:00Z');
 const ENV = Object.freeze({ HDFC_API_KEY: 'synthetic-api-key', HDFC_API_SECRET: 'synthetic-api-secret' });
@@ -44,7 +44,7 @@ function fakeProvider({ holdings, responseOverrides = [] } = {}) {
 
 test('health reports configured boolean and never exposes server values', async () => {
   const result = await invoke(create(), { method: 'GET' });
-  assert.deepEqual(result.body, { version: 'holdings-phone-v2', configured: true, diagnostics_version: 1, holdings_diagnostics_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', holdings_auth_mode: 'raw_token', profile_verification: false });
+  assert.deepEqual(result.body, { version: 'holdings-phone-v2', configured: true, diagnostics_version: 1, holdings_diagnostics_version: 1, provider_error_report_version: 1, auth_method: 'token_exchange', holdings_method: 'GET', holdings_auth_mode: 'raw_token', profile_verification: false });
   assert.equal(result.headers['cache-control'], 'no-store, private');
   assert.equal(result.headers['referrer-policy'], 'no-referrer');
   for (const value of Object.values(ENV)) assert.ok(!result.raw.includes(value));
@@ -175,7 +175,7 @@ test('missing, duplicate and tampered cookie never contact broker', async () => 
     const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie: value } });
     assert.equal(result.status, 401);
     assert.equal(result.body.error.code, 'session_invalid');
-    assert.deepEqual(result.body.error.diagnostic, { stage: 'session', reason: 'session' });
+    assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { stage: 'session', reason: 'session' });
     assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
   }
 });
@@ -186,7 +186,7 @@ test('expired and future-issued cookie fail closed without provider access', asy
   const expired = await invoke(create(noFetch, { now: () => NOW + (TTL_SECONDS + 1) * 1000 }), { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
   assert.equal(expired.status, 410);
   assert.equal(expired.body.error.code, 'session_expired');
-  assert.deepEqual(expired.body.error.diagnostic, { stage: 'session', reason: 'expired' });
+  assert.deepEqual(legacyDiagnostic(expired.body.error.diagnostic), { stage: 'session', reason: 'expired' });
   const future = COOKIE_NAME + '=' + sealSession(CONFIG, NOW + 1000).cookie;
   assert.equal((await invoke(create(), { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie: future } })).status, 401);
 });
@@ -206,7 +206,7 @@ test('provider errors are redacted and cookie is cleared', async () => {
   const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
   assert.equal(result.status, 502);
   assert.equal(result.body.error.code, 'provider_failed');
-  assert.deepEqual(result.body.error.diagnostic, { stage: 'token_exchange', reason: 'transport' });
+  assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { stage: 'token_exchange', reason: 'transport' });
   for (const value of ['synthetic-api-secret', 'synthetic-request-token', 'sensitive-provider-response']) assert.ok(!result.raw.includes(value));
   assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
 });
@@ -252,7 +252,7 @@ test('request timeout includes stalled response body and returns a redacted fail
   const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
   assert.equal(result.status, 502);
   assert.equal(result.body.error.code, 'provider_failed');
-  assert.deepEqual(result.body.error.diagnostic, { stage: 'token_exchange', reason: 'timeout' });
+  assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { stage: 'token_exchange', reason: 'timeout' });
 });
 
 test('hung stream cancellation cannot extend the bounded error response', async () => {
@@ -315,7 +315,7 @@ for (const fixture of diagnosticCases) {
     assert.equal(result.body.error.code, 'provider_failed');
     const expected = { stage: fixture.stage, reason: fixture.reason };
     if (fixture.http_status) expected.http_status = fixture.http_status;
-    assert.deepEqual(result.body.error.diagnostic, expected);
+    assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), expected);
     assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
     assert.deepEqual(fake.calls.map(call => [call.options.method, new URL(call.url).origin + new URL(call.url).pathname]), [['POST', ENDPOINTS.auth], ['GET', ENDPOINTS.holdings]].slice(0, fixture.index + 1));
     for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
@@ -333,7 +333,7 @@ test('diagnostic serialization cannot forward extra data or invalid HTTP statuse
 
 test('request denial diagnostics do not imply broker access', async () => {
   const origin = await invoke(create(), { body: { action: 'clear' }, headers: { origin: 'https://evil.invalid' } });
-  assert.deepEqual(origin.body.error.diagnostic, { stage: 'request', reason: 'origin' });
+  assert.deepEqual(legacyDiagnostic(origin.body.error.diagnostic), { stage: 'request', reason: 'origin' });
 
 });
 
@@ -357,7 +357,7 @@ test('v2 rejects legacy cookie version before token exchange', async () => {
   for (const legacy of [cookie.replace('=v2.', '=v1.'), cookie.replace(COOKIE_NAME, '__Host-hdfc_holdings_phone_v1')]) {
     const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie: legacy } });
     assert.equal(result.status, 401);
-    assert.deepEqual(result.body.error.diagnostic, { stage: 'session', reason: 'session' });
+    assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { stage: 'session', reason: 'session' });
   }
 });
 
@@ -370,7 +370,7 @@ test('ordinary browser retry after callback cookie clearing cannot read again', 
   assert.ok(complete.headers['set-cookie'].includes('Max-Age=0'));
   const retry = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' } });
   assert.equal(retry.status, 401);
-  assert.deepEqual(retry.body.error.diagnostic, { stage: 'session', reason: 'session' });
+  assert.deepEqual(legacyDiagnostic(retry.body.error.diagnostic), { stage: 'session', reason: 'session' });
   assert.equal(fake.calls.length, 2);
 });
 
@@ -406,7 +406,7 @@ test('token exchange201 never permits a holdings read', async () => {
   const cookie = await started(handler);
   const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
   assert.equal(result.status, 502);
-  assert.deepEqual(result.body.error.diagnostic, { stage: 'token_exchange', reason: 'http_status', http_status: 201 });
+  assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { stage: 'token_exchange', reason: 'http_status', http_status: 201 });
   assert.equal(fake.calls.length, 1);
 });
 
@@ -416,7 +416,7 @@ test('whitespace-only access token fails before holdings and clears the cookie',
   const cookie = await started(handler);
   const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
   assert.equal(result.status, 502);
-  assert.deepEqual(result.body.error.diagnostic, { stage: 'token_exchange', reason: 'response_shape' });
+  assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { stage: 'token_exchange', reason: 'response_shape' });
   assert.equal(fake.calls.length, 1);
   assert.ok(result.headers['set-cookie'].includes('Max-Age=0'));
   for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
@@ -432,13 +432,25 @@ test('holdings failures never fall back to profile, retry or change authenticati
     assert.equal(result.body.error.diagnostic.stage, 'holdings');
     assert.equal(result.body.error.diagnostic.reason, 'http_status');
     assert.equal(result.body.error.diagnostic.http_status, status);
-    if (status !== 422) assert.deepEqual(result.body.error.diagnostic, { stage: 'holdings', reason: 'http_status', http_status: status });
+    if (status !== 422) assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { stage: 'holdings', reason: 'http_status', http_status: status });
     assert.equal(fake.calls.length, 2);
     assert.equal(fake.calls[1].options.headers.Authorization, 'synthetic-access-token');
     assert.equal(fake.calls[1].options.headers['x-api-key'], undefined);
     for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
   }
 });
+
+function legacyDiagnostic(diagnostic) {
+  const { provider_report: report, ...legacy } = diagnostic;
+  if (report) {
+    assert.deepEqual(Object.keys(report).sort(), ['error_schema', 'message_terms', 'provider_codes', 'version']);
+    assert.equal(report.version, 1);
+    assert.ok(report.provider_codes.length <= 4);
+    assert.ok(report.error_schema.length <= 16);
+    assert.ok(report.message_terms.length <= 24);
+  }
+  return legacy;
+}
 
 const EMPTY_FLAGS = Object.freeze({ api_key_has_outer_whitespace: false, token_has_whitespace: false, token_has_bearer_prefix: false, top_level_token_fields_conflict: false });
 const HTTP422 = Object.freeze({ stage: 'holdings', reason: 'http_status', http_status: 422 });
@@ -460,6 +472,7 @@ async function callback422(response, { auth = { accessToken: 'synthetic-access-t
   assert.equal(result.body.error.diagnostic.stage, 'holdings');
   assert.equal(result.body.error.diagnostic.reason, 'http_status');
   assert.equal(result.body.error.diagnostic.http_status, 422);
+  assert.equal(result.body.error.diagnostic.provider_report.version, 1);
   assert.deepEqual(fake.calls.map(({ url, options: request }) => [request.method, new URL(url).origin + new URL(url).pathname]), [['POST', ENDPOINTS.auth], ['GET', ENDPOINTS.holdings]]);
   for (const sentinel of PRIVATE_SENTINELS) assert.ok(!result.raw.includes(sentinel));
   return { ...result, calls: fake.calls };
@@ -471,7 +484,7 @@ test('whole callback classifies published static authentication messages without
     { displayMessage: 'Full authentication is required to access this resource', api_key: ENV.HDFC_API_KEY },
   ]) {
     const result = await callback422(errorResponse(payload));
-    assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'authentication_required' });
+    assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'authentication_required' });
     assert.equal(result.calls[1].options.headers.Authorization, 'synthetic-access-token');
     assert.equal(result.calls[1].options.headers['x-api-key'], undefined);
     assert.deepEqual([...new URL(result.calls[1].url).searchParams], [['api_key', ENV.HDFC_API_KEY]]);
@@ -488,7 +501,7 @@ test('whole callback maps bounded exact messages to fixed categories only', asyn
     ['Your Portfolio Holding is Null', 'portfolio_unavailable'], ['Unprocessable entity', 'unprocessable_request'],
   ]) {
     const result = await callback422(errorResponse({ message, input: unsafeBody }));
-    assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: category });
+    assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: category });
     assert.equal(result.body.holdings, undefined);
   }
 });
@@ -496,7 +509,7 @@ test('whole callback maps bounded exact messages to fixed categories only', asyn
 test('unknown, negated, dynamic and oversized messages never acquire a specific category', async () => {
   for (const message of ['Invalid token for SYNTHETIC-PRIVATE-ID', 'Do not use Invalid API key', 'API key is not invalid', 'Invalid access token: synthetic-access-token', 'invalid', 'token', 'key', 'Unauthorized' + ' '.repeat(1024)]) {
     const result = await callback422(errorResponse({ message, description: unsafeBody }));
-    assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
+    assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
   }
 });
 
@@ -514,7 +527,7 @@ test('compatibility envelopes use bounded own message/code fields without recurs
     const result = await callback422(errorResponse(payload));
     const diagnostic = { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: category };
     if (code) diagnostic.provider_code = code;
-    assert.deepEqual(result.body.error.diagnostic, diagnostic);
+    assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), diagnostic);
     assert.equal(result.body.holdings_count, undefined);
   }
   for (const payload of [
@@ -531,9 +544,9 @@ test('compatibility envelopes use bounded own message/code fields without recurs
 
 test('conflicting recognized categories become unknown without leaking message text', async () => {
   const result = await callback422(errorResponse({ message: 'Invalid API key', error: { message: 'Invalid token' }, code: 60014, input: unsafeBody }));
-  assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'unknown', provider_code: '60014' });
+  assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'unknown', provider_code: '60014' });
   const withoutCode = await callback422(errorResponse({ message: 'Invalid API key', error: { message: 'Invalid token' } }));
-  assert.deepEqual(withoutCode.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
+  assert.deepEqual(legacyDiagnostic(withoutCode.body.error.diagnostic), { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
 });
 
 test('whole callback validation preserves only finite location/field/kind labels', async () => {
@@ -553,7 +566,7 @@ test('whole callback validation preserves only finite location/field/kind labels
     { loc: ['body', { api_key: ENV.HDFC_API_KEY }], type: 'missing' },
   ];
   const result = await callback422(errorResponse({ detail, user_id: 'SYNTHETIC-PRIVATE-ID' }));
-  assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'unknown', validation: [
+  assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'unknown', validation: [
     { location: 'header', field: 'x_api_key', kind: 'missing' },
     { location: 'header', field: 'authorization', kind: 'missing' },
     { location: 'header', field: 'user_agent', kind: 'invalid' },
@@ -592,7 +605,7 @@ test('error MIME and read/parse outcomes are explicit while base422 survives', a
     [new Response(null, { status: 422 }), 'absent', 'read_error'],
   ]) {
     const result = await callback422(response);
-    assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: format, error_outcome: outcome, error_category: 'unknown', format_flags: EMPTY_FLAGS });
+    assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { ...HTTP422, response_format: format, error_outcome: outcome, error_category: 'unknown', format_flags: EMPTY_FLAGS });
   }
 });
 
@@ -665,14 +678,14 @@ test('auth422 and other holdings failures never read optional provider error bod
   const authHandler = create(authFake.fetchImpl);
   const cookie = await started(authHandler);
   const authResult = await invoke(authHandler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie } });
-  assert.deepEqual(authResult.body.error.diagnostic, { stage: 'token_exchange', reason: 'http_status', http_status: 422 });
+  assert.deepEqual(legacyDiagnostic(authResult.body.error.diagnostic), { stage: 'token_exchange', reason: 'http_status', http_status: 422 });
   assert.equal(authFake.calls.length, 1);
   for (const status of [401, 403, 404, 500]) {
     const fake = fakeProvider({ responseOverrides: [undefined, response(status)] });
     const handler = create(fake.fetchImpl);
     const activeCookie = await started(handler);
     const result = await invoke(handler, { body: { action: 'callback', request_token: 'synthetic-request-token' }, headers: { cookie: activeCookie } });
-    assert.deepEqual(result.body.error.diagnostic, { stage: 'holdings', reason: 'http_status', http_status: status });
+    assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { stage: 'holdings', reason: 'http_status', http_status: status });
   }
   assert.equal(bodyReads, 0);
 });
@@ -755,11 +768,11 @@ test('finite static message aliases classify only full known phrases inside the 
   const aliases = ['message', 'Message', 'MESSAGE', 'msg', 'Msg', 'MSG', 'errorMessage', 'ErrorMessage', 'error_message', 'ERROR_MESSAGE', 'errorMsg', 'error_msg', 'displayMessage', 'DisplayMessage', 'display_message', 'displaymessage', 'status_error', 'description', 'detail', 'error', 'Error', 'ERROR'];
   for (const alias of aliases) {
     const recognized = await callback422(errorResponse({ [alias]: 'Invalid API key', private_profile: unsafeBody }));
-    assert.deepEqual(recognized.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'api_key_rejected' });
+    assert.deepEqual(legacyDiagnostic(recognized.body.error.diagnostic), { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'api_key_rejected' });
     assert.equal(recognized.calls[1].options.headers.Authorization, 'synthetic-access-token');
     assert.equal(recognized.calls[1].options.headers['x-api-key'], undefined);
     const privateMessage = await callback422(errorResponse({ [alias]: 'Invalid API key for SYNTHETIC-PRIVATE-ID', private_profile: unsafeBody }));
-    assert.deepEqual(privateMessage.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
+    assert.deepEqual(legacyDiagnostic(privateMessage.body.error.diagnostic), { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
   }
   for (const payload of [{ mEsSaGe: 'Invalid API key' }, { Status_Error: 'Invalid API key' }, { arbitrary: { Message: 'Invalid API key' } }]) {
     const ignored = await callback422(errorResponse(payload));
@@ -772,17 +785,124 @@ test('finite static code aliases recognize exact60014 only without claiming empt
   for (const alias of ['code', 'Code', 'CODE', 'errorCode', 'ErrorCode', 'error_code', 'ERROR_CODE', 'errorcode']) {
     for (const code of [60014, '60014']) {
       const result = await callback422(errorResponse({ [alias]: code, Message: 'sensitive-provider-response', private_profile: unsafeBody }));
-      assert.deepEqual(result.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'unknown', provider_code: '60014' });
+      assert.deepEqual(legacyDiagnostic(result.body.error.diagnostic), { ...HTTP422, response_format: 'json', error_outcome: 'classified', error_category: 'unknown', provider_code: '60014' });
       assert.equal(result.body.holdings, undefined);
       assert.equal(result.body.holdings_count, undefined);
       assert.equal(result.body.account_authenticated, undefined);
     }
     for (const code of [60015, '60014 ', 'SYNTHETIC-PRIVATE-ID']) {
       const unknown = await callback422(errorResponse({ [alias]: code, private_profile: unsafeBody }));
-      assert.deepEqual(unknown.body.error.diagnostic, { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
+      assert.deepEqual(legacyDiagnostic(unknown.body.error.diagnostic), { ...HTTP422, response_format: 'json', error_outcome: 'unknown', error_category: 'unknown', format_flags: EMPTY_FLAGS });
     }
   }
   const unmapped = await callback422(errorResponse({ cOdE: 60014, arbitrary: { Code: 60014 } }));
   assert.equal(unmapped.body.error.diagnostic.provider_code, undefined);
   assert.equal(unmapped.body.error.diagnostic.error_outcome, 'unknown');
+});
+
+function assertReportCatalog(report) {
+  assert.deepEqual(Object.keys(report).sort(), ['error_schema', 'message_terms', 'provider_codes', 'version']);
+  assert.equal(report.version, 1);
+  assert.ok(report.provider_codes.length <= 4);
+  assert.ok(report.provider_codes.every(code => typeof code === 'string' && /^[0-9]{1,6}$/u.test(code)));
+  assert.equal(new Set(report.provider_codes).size, report.provider_codes.length);
+  assert.ok(report.error_schema.length <= 16);
+  for (const item of report.error_schema) {
+    assert.deepEqual(Object.keys(item).sort(), ['path', 'type']);
+    const path = item.path.split('.');
+    assert.equal(path[0], 'root');
+    assert.ok(path.length <= 6 && item.path.length <= 95);
+    assert.ok(path.every(segment => PROVIDER_ERROR_PATH_SEGMENTS.includes(segment)));
+    assert.ok(!path.slice(1).includes('root'));
+    assert.ok(PROVIDER_ERROR_TYPES.includes(item.type));
+  }
+  assert.ok(report.message_terms.length <= 24);
+  const positions = report.message_terms.map(term => PROVIDER_ERROR_TERMS.indexOf(term));
+  assert.ok(positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1])));
+}
+
+test('whole callback reports only canonical schema, ordered terms and bounded explicit error codes', async () => {
+  const result = await callback422(errorResponse({ status: 'error', meta: { errorCode: 60042, statusMsg: 'API key invalid, application not mapped; permission required' },
+    error: { error_code: '60043', statusMessage: 'Access token expired' }, response: { statusCode: 422 },
+    code: 100021, unknown_private_field: 'SYNTHETIC-PRIVATE-ID' }));
+  const report = result.body.error.diagnostic.provider_report;
+  assertReportCatalog(report);
+  assert.deepEqual(report.provider_codes, ['60042', '60043', '422']);
+  assert.deepEqual(report.message_terms, ['api_key', 'access_token', 'application', 'permission', 'required', 'invalid', 'expired', 'not', 'mapped']);
+  assert.ok(report.error_schema.some(item => item.path === 'root.meta.code' && item.type === 'number'));
+  assert.ok(report.error_schema.some(item => item.path === 'root.other' && item.type === 'string'));
+  assert.ok(!result.raw.includes('unknown_private_field'));
+  assert.equal(result.calls.length, 2);
+  assert.equal(result.calls[1].options.headers.Authorization, 'synthetic-access-token');
+  assert.equal(result.calls[1].options.headers['x-api-key'], undefined);
+});
+
+test('runtime secrets in raw, URL, form and JSON-escaped strings are removed before report classification', async () => {
+  const env = { HDFC_API_KEY: 'synthetic-key"\\suffix', HDFC_API_SECRET: 'required api_secret hidden value' };
+  const auth = { accessToken: 'access_token invalid hidden value', access_token: '60042' };
+  const privateValues = [env.HDFC_API_KEY, env.HDFC_API_SECRET, 'synthetic-request-token', auth.accessToken, auth.access_token];
+  const encodings = privateValues.flatMap(value => [value, encodeURIComponent(value), encodeURI(value), new URLSearchParams({ value }).toString().slice(6), JSON.stringify(value).slice(1, -1), encodeURIComponent(encodeURIComponent(value))]);
+  const result = await callback422(errorResponse({ errorCode: 60042, Message: encodings.join(' | ') + ' Permission denied',
+    user_id: '100021', data: { errorCode: 100021 } }), { env, auth });
+  const report = result.body.error.diagnostic.provider_report;
+  assertReportCatalog(report);
+  assert.deepEqual(report.provider_codes, []);
+  assert.deepEqual(report.message_terms, ['permission', 'denied']);
+  for (const value of encodings) assert.ok(!result.raw.includes(value));
+  assert.equal(result.body.error.diagnostic.error_category, 'unknown');
+  const secretPhrase = await callback422(errorResponse({ Message: 'Invalid API key' }), { auth: { accessToken: 'Invalid API key' } });
+  assert.equal(secretPhrase.body.error.diagnostic.error_category, 'unknown');
+  assert.deepEqual(secretPhrase.body.error.diagnostic.provider_report.message_terms, []);
+});
+
+test('PII, numeric identifiers, nested holdings and arbitrary keys never become provider values', async () => {
+  const identifiers = ['ABCDE1234F', 'private.user@example.com', '9876543210', '192.168.1.12', 'INE009A01021', '100021'];
+  const result = await callback422(errorResponse({ errorCode: 100021, client_id: '100021', Message: identifiers.join(' ') + ' Client invalid',
+    errors: [{ code: '100021', message: 'Client 100021 invalid' }],
+    data: [{ isin: 'INE009A01021', security_id: 123456, code: '123456', errorCode: 123456, message: 'Portfolio failure' }],
+    [identifiers[1]]: { [identifiers[0]]: 'private value' } }));
+  const report = result.body.error.diagnostic.provider_report;
+  assertReportCatalog(report);
+  assert.deepEqual(report.provider_codes, []);
+  assert.ok(report.message_terms.includes('client') && report.message_terms.includes('invalid'));
+  for (const value of identifiers) assert.ok(!result.raw.includes(value));
+  assert.equal(result.body.holdings, undefined);
+  const generic = await callback422(errorResponse({ code: '100021', message: 'Client 100021 invalid' }));
+  assert.deepEqual(generic.body.error.diagnostic.provider_report.provider_codes, []);
+  for (const field of ['account_no', 'accountNo', 'customer_id', 'customerId', 'client_number', 'clientNumber', 'client', 'user', 'account']) {
+    const identified = await callback422(errorResponse({ errorCode: '100021', [field]: '100021' }));
+    assert.deepEqual(identified.body.error.diagnostic.provider_report.provider_codes, []);
+    assert.ok(!identified.raw.includes('100021'));
+  }
+});
+
+test('meta statusMsg reports singular holding through the existing canonical vocabulary', async () => {
+  const result = await callback422(errorResponse({ meta: { code: 60014, statusMsg: 'Portfolio Holding is Null' } }));
+  const report = result.body.error.diagnostic.provider_report;
+  assertReportCatalog(report);
+  assert.deepEqual(report.provider_codes, ['60014']);
+  assert.deepEqual(report.message_terms, ['holdings', 'portfolio', 'null']);
+  assert.ok(report.error_schema.some(item => item.path === 'root.meta.message' && item.type === 'string'));
+  assert.equal(result.body.holdings_count, undefined);
+});
+
+test('report traversal and optional serializer enforce bounds and exact safe data fields', async () => {
+  const payload = { errors: Array.from({ length: 6 }, (_, index) => ({ errorCode: 60040 + index, Message: PROVIDER_ERROR_TERMS.join(' ') })),
+    response: { data: { meta: { error: { errorCode: 69999, Message: 'signature checksum' } } } } };
+  const result = await callback422(errorResponse(payload));
+  const report = result.body.error.diagnostic.provider_report;
+  assertReportCatalog(report);
+  assert.deepEqual(report.provider_codes, ['60040', '60041', '60042', '60043']);
+  assert.equal(report.message_terms.length, 24);
+  assert.ok(!report.provider_codes.includes('69999'));
+  const supplied = { version: 1, provider_codes: ['60042'], error_schema: [{ path: 'root.other', type: 'string', raw: unsafeBody }], message_terms: ['invalid'], raw: unsafeBody };
+  const cleaned = new FlowError('provider_failed', 502, { ...HTTP422, provider_report: supplied }).diagnostic.provider_report;
+  assert.deepEqual(cleaned, { version: 1, provider_codes: ['60042'], error_schema: [{ path: 'root.other', type: 'string' }], message_terms: ['invalid'] });
+  let reads = 0;
+  const hostile = { version: 1, provider_codes: ['60042'], error_schema: [], get message_terms() { reads += 1; return ['invalid']; } };
+  assert.equal(new FlowError('provider_failed', 502, { ...HTTP422, provider_report: hostile }).diagnostic.provider_report, undefined);
+  assert.equal(reads, 0);
+  for (const invalid of [{ ...supplied, provider_codes: ['SYNTHETIC-PRIVATE-ID'] }, { ...supplied, error_schema: [{ path: 'root.private_id', type: 'string' }] }, { ...supplied, message_terms: ['invalid', 'api_key'] }]) {
+    assert.equal(new FlowError('provider_failed', 502, { ...HTTP422, provider_report: invalid }).diagnostic.provider_report, undefined);
+  }
 });
